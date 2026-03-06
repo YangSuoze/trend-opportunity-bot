@@ -120,6 +120,40 @@ a {
   gap: 10px;
 }
 
+.daySwitcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: #ffffff;
+  box-shadow: var(--shadow-soft);
+}
+
+.daySwitchBtn {
+  min-height: 30px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 11px;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.daySwitchBtn:hover {
+  color: var(--ink);
+}
+
+.daySwitchBtn.isActive {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
 .lastUpdated {
   margin: 0;
   display: flex;
@@ -215,6 +249,13 @@ a {
   color: var(--muted);
   font-size: 0.84rem;
   line-height: 1.45;
+}
+
+.dayFallbackNote {
+  margin: 5px 0 0;
+  color: #b34256;
+  font-size: 0.78rem;
+  line-height: 1.35;
 }
 
 .cardHeadingRow {
@@ -744,10 +785,19 @@ summary:focus-visible {
 
   .headerControls {
     flex-direction: row;
+    flex-wrap: wrap;
     justify-content: space-between;
     width: 100%;
     align-items: center;
     gap: 10px;
+  }
+
+  .daySwitcher {
+    flex: 0 0 auto;
+  }
+
+  .lastUpdated {
+    flex: 1 1 170px;
   }
 
   .btn {

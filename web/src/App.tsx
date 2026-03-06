@@ -17,6 +17,7 @@ const DRAG_START_THRESHOLD_PX = 6
 const DRAG_CLICK_SUPPRESS_MS = 140
 
 type ScoreDimensionKey = Exclude<keyof OpportunityScoring, 'total'>
+type DayPreference = 'today' | 'yesterday'
 
 interface ApiStatusPayload {
   version: string
@@ -96,6 +97,12 @@ function toLocalDayKey(date: Date) {
 function dayKeyToDate(dayKey: string) {
   const [year, month, day] = dayKey.split('-').map(Number)
   return new Date(year, month - 1, day)
+}
+
+function dayKeyWithOffset(dayKey: string, offsetDays: number) {
+  const date = dayKeyToDate(dayKey)
+  date.setDate(date.getDate() + offsetDays)
+  return toLocalDayKey(date)
 }
 
 function isSameLocalDay(date: Date, dayKey: string) {
@@ -280,6 +287,7 @@ export default function App() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null)
 
   const [todayKey, setTodayKey] = useState(() => toLocalDayKey(new Date()))
+  const [dayPreference, setDayPreference] = useState<DayPreference>('today')
   const [activeIndex, setActiveIndex] = useState(0)
   const [isDraggingFeed, setIsDraggingFeed] = useState(false)
 
@@ -396,38 +404,71 @@ export default function App() {
     return { byFingerprint, byUrl }
   }, [apiSignals])
 
-  const todaySignals = useMemo(() => {
+  const yesterdayKey = useMemo(() => dayKeyWithOffset(todayKey, -1), [todayKey])
+  const preferredDayKey = dayPreference === 'today' ? todayKey : yesterdayKey
+
+  const opportunitiesByDay = useMemo(() => {
+    const grouped = new Map<string, OpportunityWithTimestamp[]>()
+
+    apiOpportunities.forEach((card) => {
+      const timestamp = resolveOpportunityTimestamp(
+        card,
+        signalTimestampLookup.byFingerprint,
+        signalTimestampLookup.byUrl,
+      )
+      const dayKey = timestamp ? toLocalDayKey(timestamp) : todayKey
+
+      const existing = grouped.get(dayKey)
+      if (existing) {
+        existing.push({ card, timestamp })
+      } else {
+        grouped.set(dayKey, [{ card, timestamp }])
+      }
+    })
+
+    grouped.forEach((entries) => {
+      entries.sort((a, b) => totalScore(b.card) - totalScore(a.card))
+    })
+
+    return grouped
+  }, [apiOpportunities, signalTimestampLookup, todayKey])
+
+  const latestOpportunityDayKey = useMemo(() => {
+    return Array.from(opportunitiesByDay.keys()).sort((a, b) => b.localeCompare(a))[0] ?? null
+  }, [opportunitiesByDay])
+
+  const visibleDayKey = useMemo(() => {
+    if (opportunitiesByDay.has(preferredDayKey)) {
+      return preferredDayKey
+    }
+    return latestOpportunityDayKey ?? preferredDayKey
+  }, [latestOpportunityDayKey, opportunitiesByDay, preferredDayKey])
+
+  const visibleOpportunities = useMemo<OpportunityWithTimestamp[]>(() => {
+    return opportunitiesByDay.get(visibleDayKey) ?? []
+  }, [opportunitiesByDay, visibleDayKey])
+
+  const visibleSignals = useMemo(() => {
     return apiSignals.filter((signal) => {
       const timestamp = parseIsoTimestamp(signal.captured_at)
-      return !timestamp || isSameLocalDay(timestamp, todayKey)
+      if (!timestamp) {
+        return visibleDayKey === todayKey
+      }
+      return isSameLocalDay(timestamp, visibleDayKey)
     })
-  }, [apiSignals, todayKey])
-
-  const todayOpportunities = useMemo<OpportunityWithTimestamp[]>(() => {
-    return apiOpportunities
-      .map((card) => {
-        const timestamp = resolveOpportunityTimestamp(
-          card,
-          signalTimestampLookup.byFingerprint,
-          signalTimestampLookup.byUrl,
-        )
-        return { card, timestamp }
-      })
-      .filter((entry) => !entry.timestamp || isSameLocalDay(entry.timestamp, todayKey))
-      .sort((a, b) => totalScore(b.card) - totalScore(a.card))
-  }, [apiOpportunities, signalTimestampLookup, todayKey])
+  }, [apiSignals, todayKey, visibleDayKey])
 
   const signalSourceSummary = useMemo(() => {
     const bySource = new Map<string, number>()
 
-    todaySignals.forEach((signal) => {
+    visibleSignals.forEach((signal) => {
       bySource.set(signal.source, (bySource.get(signal.source) ?? 0) + 1)
     })
 
     return Array.from(bySource.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
-  }, [todaySignals])
+  }, [visibleSignals])
 
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }), [])
   const dateTimeFormatter = useMemo(
@@ -439,7 +480,17 @@ export default function App() {
     [],
   )
 
-  const todayLabel = dateFormatter.format(dayKeyToDate(todayKey))
+  const visibleDateLabel = dateFormatter.format(dayKeyToDate(visibleDayKey))
+  const visibleDayLabel =
+    visibleDayKey === todayKey
+      ? 'Today'
+      : visibleDayKey === yesterdayKey
+        ? 'Yesterday'
+        : visibleDateLabel
+  const showingLabel =
+    visibleDayLabel === visibleDateLabel ? visibleDateLabel : `${visibleDayLabel} (${visibleDateLabel})`
+  const hasAnyOpportunities = apiOpportunities.length > 0
+  const isUsingFallbackDay = hasAnyOpportunities && visibleDayKey !== preferredDayKey
   const lastUpdatedLabel = lastUpdatedAt ? dateTimeFormatter.format(lastUpdatedAt) : 'Not yet synced'
 
   const getFeedCards = useCallback(() => {
@@ -467,7 +518,7 @@ export default function App() {
 
   const onFeedKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
-      if (!todayOpportunities.length) return
+      if (!visibleOpportunities.length) return
 
       if (event.key === 'ArrowDown' || event.key === 'PageDown') {
         event.preventDefault()
@@ -486,10 +537,10 @@ export default function App() {
 
       if (event.key === 'End') {
         event.preventDefault()
-        scrollToCard(todayOpportunities.length - 1)
+        scrollToCard(visibleOpportunities.length - 1)
       }
     },
-    [scrollToCard, todayOpportunities.length],
+    [scrollToCard, visibleOpportunities.length],
   )
 
   const findNearestCardIndex = useCallback(() => {
@@ -585,18 +636,18 @@ export default function App() {
   }, [activeIndex])
 
   useEffect(() => {
-    if (!todayOpportunities.length) {
+    if (!visibleOpportunities.length) {
       setActiveIndex(0)
       activeIndexRef.current = 0
       return
     }
 
-    const next = clamp(activeIndexRef.current, 0, todayOpportunities.length - 1)
+    const next = clamp(activeIndexRef.current, 0, visibleOpportunities.length - 1)
     if (next !== activeIndexRef.current) {
       activeIndexRef.current = next
       setActiveIndex(next)
     }
-  }, [todayOpportunities.length])
+  }, [visibleOpportunities.length])
 
   useEffect(() => {
     const container = feedRef.current
@@ -623,21 +674,21 @@ export default function App() {
       container.removeEventListener('scroll', onScroll)
       if (frame) window.cancelAnimationFrame(frame)
     }
-  }, [todayOpportunities.length, findNearestCardIndex])
+  }, [visibleOpportunities.length, findNearestCardIndex])
 
   useEffect(() => {
     const container = feedRef.current
     if (!container) return
 
     const onWheel = (event: WheelEvent) => {
-      if (todayOpportunities.length < 2) return
+      if (visibleOpportunities.length < 2) return
       if (Math.abs(event.deltaY) < 5) return
 
       event.preventDefault()
       if (wheelLockRef.current) return
 
       const direction = event.deltaY > 0 ? 1 : -1
-      const nextIndex = clamp(activeIndexRef.current + direction, 0, todayOpportunities.length - 1)
+      const nextIndex = clamp(activeIndexRef.current + direction, 0, visibleOpportunities.length - 1)
       if (nextIndex === activeIndexRef.current) return
 
       wheelLockRef.current = true
@@ -651,20 +702,36 @@ export default function App() {
     return () => {
       container.removeEventListener('wheel', onWheel)
     }
-  }, [scrollToCard, todayOpportunities.length])
+  }, [scrollToCard, visibleOpportunities.length])
 
   return (
     <div className="todayShell">
       <header className="cardSurface todayHeader">
         <div className="titleBlock">
           <p className="titleEyebrow">Trend Opportunity Dashboard</p>
-          <h1>Today&apos;s Results</h1>
+          <h1>Opportunity Results</h1>
           <p>
-            Showing opportunities and signals for <strong>{todayLabel}</strong> in local time.
+            Showing: <strong>{showingLabel}</strong> (local time).
           </p>
         </div>
 
         <div className="headerControls">
+          <div className="daySwitcher" role="group" aria-label="Day switcher">
+            <button
+              type="button"
+              className={`daySwitchBtn ${dayPreference === 'today' ? 'isActive' : ''}`}
+              onClick={() => setDayPreference('today')}
+            >
+              Today
+            </button>
+            <button
+              type="button"
+              className={`daySwitchBtn ${dayPreference === 'yesterday' ? 'isActive' : ''}`}
+              onClick={() => setDayPreference('yesterday')}
+            >
+              Yesterday
+            </button>
+          </div>
           <p className="lastUpdated">
             Last updated: <span>{lastUpdatedLabel}</span>
             {apiStatus ? <small>API v{apiStatus.version}</small> : null}
@@ -688,15 +755,20 @@ export default function App() {
             <div>
               <h2>Opportunity Card Feed</h2>
               <p>
-                {todayOpportunities.length} opportunities • {todaySignals.length} signals captured today.
+                {visibleOpportunities.length} opportunities • {visibleSignals.length} signals for {visibleDayLabel}.
               </p>
+              {isUsingFallbackDay ? (
+                <p className="dayFallbackNote">
+                  No opportunities for {dayPreference}. Showing latest available day instead.
+                </p>
+              ) : null}
             </div>
             <span className="statusBadge">
-              {todayOpportunities.length ? `${activeIndex + 1} / ${todayOpportunities.length}` : '0 / 0'}
+              {visibleOpportunities.length ? `${activeIndex + 1} / ${visibleOpportunities.length}` : '0 / 0'}
             </span>
           </div>
 
-          <div className="signalSummary" aria-label="today signal source summary">
+          <div className="signalSummary" aria-label="signal source summary">
             {signalSourceSummary.length ? (
               signalSourceSummary.map(([source, count]) => (
                 <span key={source} className="signalChip">
@@ -705,7 +777,7 @@ export default function App() {
                 </span>
               ))
             ) : (
-              <span className="signalHint">No signal source counts for today yet.</span>
+              <span className="signalHint">No signal source counts for {visibleDayLabel.toLowerCase()} yet.</span>
             )}
           </div>
 
@@ -721,8 +793,8 @@ export default function App() {
             onClickCapture={onFeedClickCapture}
             aria-label="Opportunity cards feed"
           >
-            {todayOpportunities.length ? (
-              todayOpportunities.map(({ card: opportunity, timestamp }, index) => {
+            {visibleOpportunities.length ? (
+              visibleOpportunities.map(({ card: opportunity, timestamp }, index) => {
                 const score = totalScore(opportunity)
 
                 return (
@@ -826,8 +898,10 @@ export default function App() {
             ) : (
               <div className="emptyFeed" data-feed-card="true">
                 {isApiLoading
-                  ? 'Loading today\'s opportunities...'
-                  : `No opportunities for ${todayLabel} yet. This view only shows local-today results.`}
+                  ? 'Loading opportunities...'
+                  : hasAnyOpportunities
+                    ? `No opportunities for ${showingLabel}.`
+                    : 'No opportunities found in loaded artifacts yet. Run the pipeline or try Refresh after the next 09:00 local auto-refresh.'}
               </div>
             )}
           </div>
