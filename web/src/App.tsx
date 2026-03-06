@@ -110,206 +110,215 @@ export default function App() {
           <div className="sub">Load JSONL outputs and explore ranked opportunity cards (local-only, no backend).</div>
         </div>
         <div className="pills">
-          <span className="pill">cards: <b>{stats.total}</b></span>
-          <span className="pill">shown: <b>{stats.shown}</b></span>
-          <span className="pill">max score: <b>{stats.max}</b></span>
-          <button className="btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{themeLabel}</button>
+          <span className="pill pillRed">cards: <b>{stats.total}</b></span>
+          <span className="pill pillYellow">shown: <b>{stats.shown}</b></span>
+          <span className="pill pillBlue">max score: <b>{stats.max}</b></span>
+          <button className="btn btnBlue" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>{themeLabel}</button>
         </div>
       </div>
 
-      <div className="grid">
-        <div className="card">
-          <div className="sectionTitle">
-            <h2>Files</h2>
-            <div className="hint">Browser can't tail local files; use Reload to re-read.</div>
-          </div>
-
-          <div className="row">
-            <div className="field">
-              <label>opportunities.jsonl (required)</label>
-              <input
-                type="file"
-                accept=".jsonl,.txt,application/json"
-                onChange={(e) => {
-                  const f = e.target.files?.[0]
-                  if (f) void onPick('opps', f)
-                }}
-              />
-              <div className="small">
-                {opportunitiesFile.loaded ? (
-                  <span className="badge">{opportunitiesFile.loaded.name} • {opportunitiesFile.loaded.size} bytes</span>
-                ) : (
-                  <span className="warn">not loaded</span>
-                )}
-                {opportunitiesFile.error ? <span className="warn"> • {opportunitiesFile.error}</span> : null}
-              </div>
+      <div className="mainLayout">
+        <div className="controlsColumn">
+          <div className="card filesCard">
+            <div className="sectionTitle sectionTitleRed">
+              <h2>Files</h2>
+              <div className="hint">Browser can't tail local files; use Reload to re-read.</div>
             </div>
 
-            <div className="field">
-              <label>signals.jsonl (optional)</label>
-              <input
-                type="file"
-                accept=".jsonl,.txt,application/json"
-                onChange={(e) => {
-                  const f = e.target.files?.[0]
-                  if (f) void onPick('signals', f)
-                }}
-              />
-              <div className="small">
-                {signalsFile.loaded ? (
-                  <span className="badge">{signalsFile.loaded.name}</span>
-                ) : (
-                  <span className="badge">not loaded</span>
-                )}
-                {signalsFile.error ? <span className="warn"> • {signalsFile.error}</span> : null}
-              </div>
-            </div>
-
-            <div className="field">
-              <label>report.md (optional)</label>
-              <input
-                type="file"
-                accept=".md,.txt,text/markdown"
-                onChange={(e) => {
-                  const f = e.target.files?.[0]
-                  if (f) void onPick('report', f)
-                }}
-              />
-              <div className="small">
-                {reportFile.loaded ? (
-                  <span className="badge">{reportFile.loaded.name}</span>
-                ) : (
-                  <span className="badge">not loaded</span>
-                )}
-                {reportFile.error ? <span className="warn"> • {reportFile.error}</span> : null}
-              </div>
-            </div>
-
-            <button className="btn" onClick={() => void reloadAll()} disabled={!opportunitiesFile.file && !signalsFile.file && !reportFile.file}>
-              Reload
-            </button>
-          </div>
-
-          {opportunitiesParse?.warnings?.length ? (
-            <div className="small warn" style={{ marginTop: 10 }}>
-              Parsed with warnings ({opportunitiesParse.warnings.length}): {opportunitiesParse.warnings.slice(0, 3).join(' • ')}
-            </div>
-          ) : null}
-
-          <div className="footer">
-            Tip: while running <code>trendbot analyze</code>, keep generating <code>opportunities.jsonl</code>, then click Reload here to refresh.
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="sectionTitle">
-            <h2>Filters</h2>
-            <div className="hint">Search covers solution/source_title/zh_summary/zh_analysis</div>
-          </div>
-          <div className="row">
-            <div className="field">
-              <label>Source</label>
-              <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-                <option value="">All</option>
-                {sources.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="field">
-              <label>Min score</label>
-              <input
-                type="number"
-                value={minScore}
-                min={0}
-                max={30}
-                onChange={(e) => setMinScore(clamp(Number(e.target.value), 0, 30))}
-              />
-              <input
-                type="range"
-                value={minScore}
-                min={0}
-                max={30}
-                onChange={(e) => setMinScore(Number(e.target.value))}
-              />
-            </div>
-            <div className="field" style={{ minWidth: 320 }}>
-              <label>Keyword</label>
-              <input type="text" placeholder="e.g. RAG / 价格 / developer" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-            </div>
-            <button className="btn" onClick={() => { setSourceFilter(''); setMinScore(0); setKeyword('') }}>Reset</button>
-          </div>
-
-          {reportText ? (
-            <div style={{ marginTop: 12 }}>
-              <div className="sectionTitle">
-                <h2>Report.md (preview)</h2>
-                <div className="hint">Loaded, not parsed.</div>
-              </div>
-              <div className="tableWrap" style={{ padding: 10 }}>
-                <div className="small" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
-                  {reportText.slice(0, 1200)}
-                  {reportText.length > 1200 ? '\n\n…' : ''}
+            <div className="row">
+              <div className="field">
+                <label>opportunities.jsonl (required)</label>
+                <input
+                  type="file"
+                  accept=".jsonl,.txt,application/json"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) void onPick('opps', f)
+                  }}
+                />
+                <div className="small">
+                  {opportunitiesFile.loaded ? (
+                    <span className="badge">{opportunitiesFile.loaded.name} • {opportunitiesFile.loaded.size} bytes</span>
+                  ) : (
+                    <span className="warn">not loaded</span>
+                  )}
+                  {opportunitiesFile.error ? <span className="warn"> • {opportunitiesFile.error}</span> : null}
                 </div>
               </div>
-            </div>
-          ) : null}
 
-          {signalsParse?.records?.length ? (
-            <div style={{ marginTop: 12 }}>
-              <div className="sectionTitle">
-                <h2>Signals</h2>
-                <div className="hint">{signalsParse.records.length} loaded</div>
+              <div className="field">
+                <label>signals.jsonl (optional)</label>
+                <input
+                  type="file"
+                  accept=".jsonl,.txt,application/json"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) void onPick('signals', f)
+                  }}
+                />
+                <div className="small">
+                  {signalsFile.loaded ? (
+                    <span className="badge">{signalsFile.loaded.name}</span>
+                  ) : (
+                    <span className="badge">not loaded</span>
+                  )}
+                  {signalsFile.error ? <span className="warn"> • {signalsFile.error}</span> : null}
+                </div>
               </div>
-              <div className="small">Signals are currently not joined to cards; used only for optional context.</div>
+
+              <div className="field">
+                <label>report.md (optional)</label>
+                <input
+                  type="file"
+                  accept=".md,.txt,text/markdown"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) void onPick('report', f)
+                  }}
+                />
+                <div className="small">
+                  {reportFile.loaded ? (
+                    <span className="badge">{reportFile.loaded.name}</span>
+                  ) : (
+                    <span className="badge">not loaded</span>
+                  )}
+                  {reportFile.error ? <span className="warn"> • {reportFile.error}</span> : null}
+                </div>
+              </div>
+
+              <button
+                className="btn btnRed"
+                onClick={() => void reloadAll()}
+                disabled={!opportunitiesFile.file && !signalsFile.file && !reportFile.file}
+              >
+                Reload
+              </button>
             </div>
-          ) : null}
-        </div>
-      </div>
 
-      <div className="card" style={{ marginTop: 14 }}>
-        <div className="sectionTitle">
-          <h2>Opportunity Cards</h2>
-          <div className="hint">Click a row to open details.</div>
+            {opportunitiesParse?.warnings?.length ? (
+              <div className="small warn parseWarn">
+                Parsed with warnings ({opportunitiesParse.warnings.length}): {opportunitiesParse.warnings.slice(0, 3).join(' • ')}
+              </div>
+            ) : null}
+
+            <div className="footer">
+              Tip: while running <code>trendbot analyze</code>, keep generating <code>opportunities.jsonl</code>, then click Reload here to
+              refresh.
+            </div>
+          </div>
+
+          <div className="card filtersCard">
+            <div className="sectionTitle sectionTitleBlue">
+              <h2>Filters</h2>
+              <div className="hint">Search covers solution/source_title/zh_summary/zh_analysis</div>
+            </div>
+            <div className="row">
+              <div className="field">
+                <label>Source</label>
+                <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+                  <option value="">All</option>
+                  {sources.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label>Min score</label>
+                <input
+                  type="number"
+                  value={minScore}
+                  min={0}
+                  max={30}
+                  onChange={(e) => setMinScore(clamp(Number(e.target.value), 0, 30))}
+                />
+                <input
+                  type="range"
+                  value={minScore}
+                  min={0}
+                  max={30}
+                  onChange={(e) => setMinScore(Number(e.target.value))}
+                />
+              </div>
+              <div className="field fieldWide">
+                <label>Keyword</label>
+                <input type="text" placeholder="e.g. RAG / 价格 / developer" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+              </div>
+              <button className="btn btnYellow" onClick={() => { setSourceFilter(''); setMinScore(0); setKeyword('') }}>Reset</button>
+            </div>
+
+            {reportText ? (
+              <div className="auxSection reportSection">
+                <div className="sectionTitle sectionTitleGray">
+                  <h2>Report.md (preview)</h2>
+                  <div className="hint">Loaded, not parsed.</div>
+                </div>
+                <div className="tableWrap tableWrapInset">
+                  <div className="small reportPreview">
+                    {reportText.slice(0, 1200)}
+                    {reportText.length > 1200 ? '\n\n…' : ''}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {signalsParse?.records?.length ? (
+              <div className="auxSection signalsSection">
+                <div className="sectionTitle sectionTitleYellow">
+                  <h2>Signals</h2>
+                  <div className="hint">{signalsParse.records.length} loaded</div>
+                </div>
+                <div className="small">Signals are currently not joined to cards; used only for optional context.</div>
+              </div>
+            ) : null}
+          </div>
         </div>
 
-        <div className="tableWrap">
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 90 }}>Total</th>
-                <th>Solution</th>
-                <th style={{ width: 220 }}>Target user</th>
-                <th style={{ width: 140 }}>Source</th>
-                <th>Source title</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((o) => (
-                <tr key={o.source_fingerprint || o.source_url} onClick={() => setSelected(o)}>
-                  <td className="score">{o.scoring.total}</td>
-                  <td>{o.solution}</td>
-                  <td>{o.target_user}</td>
-                  <td><span className="badge">{o.source}</span></td>
-                  <td>
-                    <a href={o.source_url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
-                      {o.source_title}
-                    </a>
-                    <span className="small" style={{ marginLeft: 8, opacity: 0.7 }}>({linkLabel(o.source_url)})</span>
-                  </td>
-                </tr>
-              ))}
-              {!filtered.length ? (
-                <tr>
-                  <td colSpan={5} className="small" style={{ padding: 16 }}>
-                    No results. Load opportunities.jsonl or relax filters.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
+        <div className="tableColumn">
+          <div className="card tableCard">
+            <div className="sectionTitle sectionTitleYellow">
+              <h2>Opportunity Cards</h2>
+              <div className="hint">Click a row to open details.</div>
+            </div>
+
+            <div className="tableWrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th className="thScore">Total</th>
+                    <th>Solution</th>
+                    <th className="thTarget">Target user</th>
+                    <th className="thSource">Source</th>
+                    <th>Source title</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((o) => (
+                    <tr key={o.source_fingerprint || o.source_url} onClick={() => setSelected(o)}>
+                      <td className="score">{o.scoring.total}</td>
+                      <td>{o.solution}</td>
+                      <td>{o.target_user}</td>
+                      <td><span className="badge">{o.source}</span></td>
+                      <td>
+                        <a href={o.source_url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+                          {o.source_title}
+                        </a>
+                        <span className="small sourceHost">({linkLabel(o.source_url)})</span>
+                      </td>
+                    </tr>
+                  ))}
+                  {!filtered.length ? (
+                    <tr>
+                      <td colSpan={5} className="small emptyState">
+                        No results. Load opportunities.jsonl or relax filters.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -319,12 +328,12 @@ export default function App() {
             <div className="modalHeader">
               <div>
                 <h3>{selected.solution}</h3>
-                <div className="small">
+                <div className="small modalMeta">
                   <span className="badge">{selected.source}</span> • score <b>{selected.scoring.total}</b> •{' '}
                   <a href={selected.source_url} target="_blank" rel="noreferrer">{selected.source_title}</a>
                 </div>
               </div>
-              <button className="btn" onClick={() => setSelected(null)}>Close</button>
+              <button className="btn btnRed" onClick={() => setSelected(null)}>Close</button>
             </div>
 
             <div className="kv">
