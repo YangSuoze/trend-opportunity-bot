@@ -491,16 +491,29 @@ option {
 
 .feedViewport {
   margin-top: 12px;
-  max-height: calc(100vh - 168px);
-  min-height: 660px;
+  height: clamp(560px, 78vh, 900px);
   overflow-y: auto;
-  padding-right: 6px;
+  padding: 10px 6px 26px 2px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   scroll-snap-type: y mandatory;
+  scroll-padding-top: 10px;
+  scroll-padding-bottom: 26px;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+  cursor: grab;
   scrollbar-width: thin;
   scrollbar-color: #d8ddea transparent;
+}
+
+.feedViewport.isDragging {
+  cursor: grabbing;
+}
+
+.feedViewport.isDragging,
+.feedViewport.isDragging * {
+  user-select: none;
 }
 
 .feedViewport::-webkit-scrollbar {
@@ -518,7 +531,9 @@ option {
   border-radius: var(--radius-lg);
   background: #ffffff;
   box-shadow: var(--shadow-soft);
+  min-height: clamp(360px, 48vh, 540px);
   scroll-snap-align: start;
+  scroll-snap-stop: always;
   scroll-margin-top: 10px;
   transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
@@ -894,8 +909,7 @@ summary:focus-visible {
   }
 
   .feedViewport {
-    max-height: 76vh;
-    min-height: 540px;
+    height: clamp(520px, 74vh, 820px);
   }
 }
 
@@ -934,6 +948,14 @@ summary:focus-visible {
   .detailsGrid {
     grid-template-columns: 1fr;
   }
+
+  .feedViewport {
+    height: clamp(480px, 72vh, 760px);
+  }
+
+  .feedCard {
+    min-height: clamp(340px, 50vh, 500px);
+  }
 }
 
 @media (max-width: 640px) {
@@ -958,8 +980,7 @@ summary:focus-visible {
   }
 
   .feedViewport {
-    max-height: none;
-    min-height: 440px;
+    height: clamp(430px, 70vh, 700px);
   }
 
   .donutRow {
@@ -969,6 +990,10 @@ summary:focus-visible {
 
   .dimensionItem {
     grid-template-columns: 82px 1fr auto;
+  }
+
+  .feedCard {
+    min-height: clamp(310px, 52vh, 460px);
   }
 }
 

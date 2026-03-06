@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import './App.css'
 import { parseOpportunitiesJsonl, parseSignalsJsonl } from './parsers'
 import type { OpportunityCard, OpportunityScoring, SignalRecord } from './types'
@@ -6,6 +15,8 @@ import { useFileText } from './useFileText'
 
 const DEFAULT_API_BASE = import.meta.env.VITE_TRENDBOT_API_BASE ?? 'http://127.0.0.1:8000'
 const SNAP_LOCK_MS = 340
+const DRAG_START_THRESHOLD_PX = 6
+const DRAG_CLICK_SUPPRESS_MS = 140
 
 type ViewMode = 'api' | 'file'
 type JobKind = 'collect' | 'analyze' | 'report'
@@ -31,6 +42,13 @@ interface JobState {
 interface JobLogEntry {
   type: EventType
   message: string
+}
+
+interface FeedDragState {
+  pointerId: number
+  startY: number
+  startScrollTop: number
+  moved: boolean
 }
 
 const SCORE_DIMENSIONS: Array<{ key: ScoreDimensionKey; label: string; color: string }> = [
@@ -61,6 +79,16 @@ function linkLabel(url: string) {
   } catch {
     return 'link'
   }
+}
+
+function isInteractiveTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+
+  return Boolean(
+    target.closest(
+      'a,button,input,select,textarea,label,summary,[role="button"],[data-feed-no-drag="true"]',
+    ),
+  )
 }
 
 function totalScore(card: OpportunityCard) {
@@ -270,11 +298,14 @@ export default function App() {
   const [minScore, setMinScore] = useState<number>(0)
   const [keyword, setKeyword] = useState<string>('')
   const [activeIndex, setActiveIndex] = useState(0)
+  const [isDraggingFeed, setIsDraggingFeed] = useState(false)
 
   const eventSourceRef = useRef<EventSource | null>(null)
   const feedRef = useRef<HTMLDivElement | null>(null)
   const activeIndexRef = useRef(0)
   const wheelLockRef = useRef(false)
+  const feedDragRef = useRef<FeedDragState | null>(null)
+  const suppressFeedClickUntilRef = useRef(0)
 
   const closeEventStream = useCallback(() => {
     eventSourceRef.current?.close()
@@ -534,6 +565,94 @@ export default function App() {
     [filtered.length, scrollToCard],
   )
 
+  const findNearestCardIndex = useCallback(() => {
+    const container = feedRef.current
+    if (!container) return -1
+
+    const cards = getFeedCards()
+    if (!cards.length) return -1
+
+    const anchor = container.scrollTop + container.clientHeight * 0.45
+    let nearestIndex = 0
+    let nearestDistance = Number.POSITIVE_INFINITY
+
+    cards.forEach((card, index) => {
+      const distance = Math.abs(card.offsetTop - anchor)
+      if (distance < nearestDistance) {
+        nearestDistance = distance
+        nearestIndex = index
+      }
+    })
+
+    return nearestIndex
+  }, [getFeedCards])
+
+  const onFeedPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary) return
+    if (event.pointerType === 'mouse' && event.button !== 0) return
+    if (isInteractiveTarget(event.target)) return
+
+    const container = feedRef.current
+    if (!container) return
+
+    feedDragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startScrollTop: container.scrollTop,
+      moved: false,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsDraggingFeed(true)
+  }, [])
+
+  const onFeedPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = feedDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+
+    const container = feedRef.current
+    if (!container) return
+
+    const deltaY = event.clientY - drag.startY
+    if (!drag.moved && Math.abs(deltaY) >= DRAG_START_THRESHOLD_PX) {
+      drag.moved = true
+    }
+
+    if (!drag.moved) return
+
+    event.preventDefault()
+    container.scrollTop = drag.startScrollTop - deltaY
+  }, [])
+
+  const onFeedPointerRelease = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = feedDragRef.current
+      if (!drag || drag.pointerId !== event.pointerId) return
+
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+
+      if (drag.moved) {
+        suppressFeedClickUntilRef.current = window.performance.now() + DRAG_CLICK_SUPPRESS_MS
+        const nearestIndex = findNearestCardIndex()
+        if (nearestIndex >= 0) {
+          scrollToCard(nearestIndex)
+        }
+      }
+
+      feedDragRef.current = null
+      setIsDraggingFeed(false)
+    },
+    [findNearestCardIndex, scrollToCard],
+  )
+
+  const onFeedClickCapture = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (window.performance.now() <= suppressFeedClickUntilRef.current) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+  }, [])
+
   useEffect(() => {
     activeIndexRef.current = activeIndex
   }, [activeIndex])
@@ -562,20 +681,8 @@ export default function App() {
       frame = window.requestAnimationFrame(() => {
         frame = 0
 
-        const cards = getFeedCards()
-        if (!cards.length) return
-
-        const anchor = container.scrollTop + container.clientHeight * 0.45
-        let nearestIndex = 0
-        let nearestDistance = Number.POSITIVE_INFINITY
-
-        cards.forEach((card, index) => {
-          const distance = Math.abs(card.offsetTop - anchor)
-          if (distance < nearestDistance) {
-            nearestDistance = distance
-            nearestIndex = index
-          }
-        })
+        const nearestIndex = findNearestCardIndex()
+        if (nearestIndex < 0) return
 
         if (nearestIndex !== activeIndexRef.current) {
           activeIndexRef.current = nearestIndex
@@ -589,7 +696,7 @@ export default function App() {
       container.removeEventListener('scroll', onScroll)
       if (frame) window.cancelAnimationFrame(frame)
     }
-  }, [getFeedCards, filtered.length])
+  }, [filtered.length, findNearestCardIndex])
 
   useEffect(() => {
     const container = feedRef.current
@@ -980,7 +1087,7 @@ export default function App() {
             <div className="cardHeading cardHeadingRow">
               <div>
                 <h2>Opportunity Card Feed</h2>
-                <p>Wheel/trackpad snaps one card per scroll. Arrow keys, Home, End also work.</p>
+                <p>Wheel snap, drag/swipe, and keyboard controls for quick card scanning.</p>
               </div>
               <span className="statusBadge">
                 {filtered.length ? `${activeIndex + 1} / ${filtered.length}` : '0 / 0'}
@@ -989,9 +1096,14 @@ export default function App() {
 
             <div
               ref={feedRef}
-              className="feedViewport"
+              className={`feedViewport ${isDraggingFeed ? 'isDragging' : ''}`}
               tabIndex={0}
               onKeyDown={onFeedKeyDown}
+              onPointerDown={onFeedPointerDown}
+              onPointerMove={onFeedPointerMove}
+              onPointerUp={onFeedPointerRelease}
+              onPointerCancel={onFeedPointerRelease}
+              onClickCapture={onFeedClickCapture}
               aria-label="Opportunity cards feed"
             >
               {filtered.length ? (
