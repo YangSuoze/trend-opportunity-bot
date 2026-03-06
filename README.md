@@ -1,5 +1,7 @@
 # trend-opportunity-bot
 
+- 中文说明：见 [README.zh-CN.md](./README.zh-CN.md)
+
 Production-ready Python CLI to collect trend signals and generate ranked opportunity cards.
 
 ## Features
@@ -138,3 +140,33 @@ Opportunity card fields:
 - Unit tests mock `httpx` and do not require network
 - Ruff linting
 - GitHub Actions CI runs lint + tests
+
+
+## Web UI (React + TypeScript)
+
+A local-only UI lives in `web/` for viewing `opportunities.jsonl`.
+
+Run locally:
+
+```bash
+cd web
+pnpm install
+pnpm dev
+```
+
+Build:
+
+```bash
+cd web
+pnpm build
+```
+
+## Deploy (static hosting)
+
+The web app is a static Vite build output in `web/dist`. Recommended options:
+
+- **Vercel**: set Root Directory to `web`, Build Command `pnpm install && pnpm build`, Output `dist`.
+- **Netlify**: Base `web`, Build `pnpm install && pnpm build`, Publish `web/dist`.
+- **GitHub Pages**: build `web/dist` and publish via Pages (branch or Actions).
+
+Note: browsers cannot tail local files; use Reload to re-read the chosen JSONL file.
