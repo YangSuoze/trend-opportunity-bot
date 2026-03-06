@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterable
 from datetime import timedelta
 from pathlib import Path
+from typing import TextIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel
@@ -97,15 +98,25 @@ def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _write_jsonl_rows(handle: TextIO, items: Iterable[BaseModel | dict]) -> None:
+    for item in items:
+        if isinstance(item, BaseModel):
+            payload = item.model_dump(mode="json")
+        else:
+            payload = item
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
 def write_jsonl(path: Path, items: Iterable[BaseModel | dict]) -> None:
     ensure_parent_dir(path)
     with path.open("w", encoding="utf-8") as handle:
-        for item in items:
-            if isinstance(item, BaseModel):
-                payload = item.model_dump(mode="json")
-            else:
-                payload = item
-            handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        _write_jsonl_rows(handle, items)
+
+
+def append_jsonl(path: Path, items: Iterable[BaseModel | dict]) -> None:
+    ensure_parent_dir(path)
+    with path.open("a", encoding="utf-8") as handle:
+        _write_jsonl_rows(handle, items)
 
 
 def read_jsonl(path: Path) -> list[dict]:

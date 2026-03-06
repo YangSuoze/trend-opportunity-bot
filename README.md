@@ -93,6 +93,19 @@ Analyze:
 trendbot analyze --in artifacts/signals.jsonl --out artifacts/opportunities.jsonl --top 30
 ```
 
+`analyze` behavior:
+- Shows live per-item progress: `[i/N] analyzing <title> (source=<source>)`
+- Appends each successful card to output JSONL immediately (incremental output)
+- Logs per-signal model failures and continues with remaining signals
+- `--resume/--no-resume` (default `--resume`) controls whether existing output is reused
+  and already-analyzed `source_fingerprint` rows are skipped
+
+Start a fresh output file:
+
+```bash
+trendbot analyze --in artifacts/signals.jsonl --out artifacts/opportunities.jsonl --top 30 --no-resume
+```
+
 Report:
 
 ```bash

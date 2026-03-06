@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from trendbot.models import OpportunityCard, Signal
 from trendbot.openai_client import OpenAIClient, OpenAIClientError
-from trendbot.utils import deduplicate_signals, read_jsonl, write_jsonl
+from trendbot.utils import append_jsonl, deduplicate_signals, read_jsonl, write_jsonl
 
 _SYSTEM_PROMPT = """
 You are a product strategist. Return ONLY valid JSON.
@@ -40,17 +41,34 @@ class AnalyzeError(RuntimeError):
     pass
 
 
+ProgressCallback = Callable[[int, int, Signal], None]
+ErrorCallback = Callable[[Signal, Exception], None]
+CardCallback = Callable[[OpportunityCard], None]
+
+
 def analyze_signals(
-    signals: list[Signal], *, top: int, client: OpenAIClient
+    signals: list[Signal],
+    *,
+    top: int,
+    client: OpenAIClient,
+    seen_fingerprints: set[str] | None = None,
+    on_progress: ProgressCallback | None = None,
+    on_error: ErrorCallback | None = None,
+    on_card: CardCallback | None = None,
 ) -> list[OpportunityCard]:
     unique_signals = deduplicate_signals(signals)
     ranked = rank_signals(unique_signals)
     selected = ranked[:top]
+    seen = seen_fingerprints if seen_fingerprints is not None else set()
+    to_analyze = [signal for signal in selected if signal.fingerprint not in seen]
+    total = len(to_analyze)
 
     cards: list[OpportunityCard] = []
-    failures: list[str] = []
 
-    for index, signal in enumerate(selected):
+    for index, signal in enumerate(to_analyze, start=1):
+        if on_progress:
+            on_progress(index, total, signal)
+
         user_prompt = _build_user_prompt(signal)
 
         try:
@@ -78,16 +96,17 @@ def analyze_signals(
                 scoring=payload.get("scoring", {}),
             )
             cards.append(card)
+            seen.add(signal.fingerprint)
+            if on_card:
+                on_card(card)
         except (OpenAIClientError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            failures.append(f"{signal.title}: {exc}")
+            if on_error:
+                on_error(signal, exc)
             continue
 
         # Small pause to be friendly to hosted model rate limits.
-        if index < len(selected) - 1:
+        if index < total:
             time.sleep(0.2)
-
-    if not cards and failures:
-        raise AnalyzeError(f"analysis failed for all signals; first error: {failures[0]}")
 
     return cards
 
@@ -98,12 +117,39 @@ def analyze_file(
     output_path: Path,
     top: int,
     client: OpenAIClient,
+    resume: bool = True,
+    on_progress: ProgressCallback | None = None,
+    on_error: ErrorCallback | None = None,
 ) -> list[OpportunityCard]:
     rows = read_jsonl(input_path)
     signals = [Signal.model_validate(row) for row in rows]
-    cards = analyze_signals(signals, top=top, client=client)
-    write_jsonl(output_path, cards)
+    seen_fingerprints: set[str] = set()
+
+    if resume and output_path.exists():
+        seen_fingerprints = _load_source_fingerprints(output_path)
+    else:
+        write_jsonl(output_path, [])
+
+    cards = analyze_signals(
+        signals,
+        top=top,
+        client=client,
+        seen_fingerprints=seen_fingerprints,
+        on_progress=on_progress,
+        on_error=on_error,
+        on_card=lambda card: append_jsonl(output_path, [card]),
+    )
     return cards
+
+
+def _load_source_fingerprints(path: Path) -> set[str]:
+    rows = read_jsonl(path)
+    fingerprints: set[str] = set()
+    for row in rows:
+        value = row.get("source_fingerprint")
+        if isinstance(value, str) and value:
+            fingerprints.add(value)
+    return fingerprints
 
 
 def rank_signals(signals: list[Signal]) -> list[Signal]:

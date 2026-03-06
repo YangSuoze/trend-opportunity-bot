@@ -30,6 +30,7 @@ from trendbot.utils import deduplicate_signals, parse_window, write_jsonl
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
+error_console = Console(stderr=True)
 
 
 @app.command()
@@ -211,6 +212,13 @@ def analyze(
         int,
         typer.Option("--top", min=1, max=500, help="Analyze top N ranked signals"),
     ] = 30,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume/--no-resume",
+            help="Resume from existing output file and skip already analyzed fingerprints",
+        ),
+    ] = True,
 ) -> None:
     """Analyze signals with an OpenAI-compatible model and generate opportunity cards."""
 
@@ -225,11 +233,24 @@ def analyze(
     )
 
     try:
-        cards = analyze_file(input_path=in_path, output_path=out, top=top, client=client)
+        cards = analyze_file(
+            input_path=in_path,
+            output_path=out,
+            top=top,
+            client=client,
+            resume=resume,
+            on_progress=lambda index, total, signal: console.print(
+                f"[{index}/{total}] analyzing {signal.title} (source={signal.source})"
+            ),
+            on_error=lambda signal, exc: error_console.print(
+                "[yellow]analysis failed:[/yellow] "
+                f"{signal.title} (source={signal.source}) -> {exc}"
+            ),
+        )
     except (AnalyzeError, OpenAIClientError, ValueError) as exc:
         raise typer.Exit(code=_exit_with_error(str(exc))) from exc
 
-    console.print(f"[bold]Saved {len(cards)} opportunity cards to {out}[/bold]")
+    console.print(f"[bold]Saved {len(cards)} new opportunity cards to {out}[/bold]")
 
 
 @app.command()
