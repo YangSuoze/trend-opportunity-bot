@@ -30,8 +30,8 @@ interface ApiStatusPayload {
 
 interface FeedDragState {
   pointerId: number
-  startY: number
-  startScrollTop: number
+  startX: number
+  startScrollLeft: number
   moved: boolean
 }
 
@@ -495,8 +495,12 @@ export default function App() {
 
   const getFeedCards = useCallback(() => {
     const container = feedRef.current
-    if (!container) return [] as HTMLDivElement[]
-    return Array.from(container.querySelectorAll<HTMLDivElement>('[data-feed-card="true"]'))
+    if (!container) return [] as HTMLElement[]
+    return Array.from(container.querySelectorAll<HTMLElement>('[data-feed-card="true"]'))
+  }, [])
+
+  const getCardOffsetLeft = useCallback((container: HTMLDivElement, card: HTMLElement) => {
+    return card.getBoundingClientRect().left - container.getBoundingClientRect().left + container.scrollLeft
   }, [])
 
   const scrollToCard = useCallback(
@@ -509,23 +513,24 @@ export default function App() {
 
       const next = clamp(index, 0, cards.length - 1)
       const target = cards[next]
-      container.scrollTo({ top: Math.max(target.offsetTop - 12, 0), behavior })
+      const left = Math.max(getCardOffsetLeft(container, target), 0)
+      container.scrollTo({ left, behavior })
       activeIndexRef.current = next
       setActiveIndex(next)
     },
-    [getFeedCards],
+    [getCardOffsetLeft, getFeedCards],
   )
 
   const onFeedKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       if (!visibleOpportunities.length) return
 
-      if (event.key === 'ArrowDown' || event.key === 'PageDown') {
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'PageDown') {
         event.preventDefault()
         scrollToCard(activeIndexRef.current + 1)
       }
 
-      if (event.key === 'ArrowUp' || event.key === 'PageUp') {
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowUp' || event.key === 'PageUp') {
         event.preventDefault()
         scrollToCard(activeIndexRef.current - 1)
       }
@@ -550,12 +555,12 @@ export default function App() {
     const cards = getFeedCards()
     if (!cards.length) return -1
 
-    const anchor = container.scrollTop + container.clientHeight * 0.45
+    const anchor = container.scrollLeft + container.clientWidth * 0.38
     let nearestIndex = 0
     let nearestDistance = Number.POSITIVE_INFINITY
 
     cards.forEach((card, index) => {
-      const distance = Math.abs(card.offsetTop - anchor)
+      const distance = Math.abs(getCardOffsetLeft(container, card) - anchor)
       if (distance < nearestDistance) {
         nearestDistance = distance
         nearestIndex = index
@@ -563,7 +568,7 @@ export default function App() {
     })
 
     return nearestIndex
-  }, [getFeedCards])
+  }, [getCardOffsetLeft, getFeedCards])
 
   const onFeedPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!event.isPrimary) return
@@ -575,8 +580,8 @@ export default function App() {
 
     feedDragRef.current = {
       pointerId: event.pointerId,
-      startY: event.clientY,
-      startScrollTop: container.scrollTop,
+      startX: event.clientX,
+      startScrollLeft: container.scrollLeft,
       moved: false,
     }
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -590,15 +595,15 @@ export default function App() {
     const container = feedRef.current
     if (!container) return
 
-    const deltaY = event.clientY - drag.startY
-    if (!drag.moved && Math.abs(deltaY) >= DRAG_START_THRESHOLD_PX) {
+    const deltaX = event.clientX - drag.startX
+    if (!drag.moved && Math.abs(deltaX) >= DRAG_START_THRESHOLD_PX) {
       drag.moved = true
     }
 
     if (!drag.moved) return
 
     event.preventDefault()
-    container.scrollTop = drag.startScrollTop - deltaY
+    container.scrollLeft = drag.startScrollLeft - deltaX
   }, [])
 
   const onFeedPointerRelease = useCallback(
@@ -629,6 +634,22 @@ export default function App() {
       event.preventDefault()
       event.stopPropagation()
     }
+  }, [])
+
+  const shouldAllowCardVerticalWheel = useCallback((target: EventTarget | null, delta: number) => {
+    if (!(target instanceof HTMLElement)) return false
+
+    const card = target.closest<HTMLElement>('.feedCard')
+    if (!card) return false
+
+    const maxScrollTop = card.scrollHeight - card.clientHeight
+    if (maxScrollTop <= 1) return false
+
+    if (delta > 0) {
+      return card.scrollTop < maxScrollTop - 1
+    }
+
+    return card.scrollTop > 1
   }, [])
 
   useEffect(() => {
@@ -682,12 +703,14 @@ export default function App() {
 
     const onWheel = (event: WheelEvent) => {
       if (visibleOpportunities.length < 2) return
-      if (Math.abs(event.deltaY) < 5) return
+      const dominantDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+      if (Math.abs(dominantDelta) < 5) return
+      if (shouldAllowCardVerticalWheel(event.target, dominantDelta)) return
 
       event.preventDefault()
       if (wheelLockRef.current) return
 
-      const direction = event.deltaY > 0 ? 1 : -1
+      const direction = dominantDelta > 0 ? 1 : -1
       const nextIndex = clamp(activeIndexRef.current + direction, 0, visibleOpportunities.length - 1)
       if (nextIndex === activeIndexRef.current) return
 
@@ -702,7 +725,7 @@ export default function App() {
     return () => {
       container.removeEventListener('wheel', onWheel)
     }
-  }, [scrollToCard, visibleOpportunities.length])
+  }, [scrollToCard, shouldAllowCardVerticalWheel, visibleOpportunities.length])
 
   return (
     <div className="todayShell">
@@ -777,7 +800,7 @@ export default function App() {
                 </span>
               ))
             ) : (
-              <span className="signalHint">No signal source counts for {visibleDayLabel.toLowerCase()} yet.</span>
+              <span className="signalHint">No signal source counts for {visibleDayLabel} yet.</span>
             )}
           </div>
 
@@ -791,7 +814,7 @@ export default function App() {
             onPointerUp={onFeedPointerRelease}
             onPointerCancel={onFeedPointerRelease}
             onClickCapture={onFeedClickCapture}
-            aria-label="Opportunity cards feed"
+            aria-label="Opportunity cards carousel"
           >
             {visibleOpportunities.length ? (
               visibleOpportunities.map(({ card: opportunity, timestamp }, index) => {

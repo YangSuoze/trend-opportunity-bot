@@ -61,6 +61,7 @@ a {
   width: min(1120px, 100%);
   margin: 0 auto;
   padding: 18px;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -228,10 +229,17 @@ a {
 
 .feedColumn {
   min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
 }
 
 .feedPanel {
   padding: 16px;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 .cardHeading {
@@ -308,16 +316,23 @@ a {
 }
 
 .feedViewport {
-  height: clamp(540px, 78vh, 920px);
-  overflow-y: auto;
-  padding: 6px 4px 22px 2px;
+  --carousel-gap: 12px;
+  --carousel-peek: clamp(24px, 5vw, 72px);
+  --carousel-edge: 2px;
+  flex: 1 1 auto;
+  min-height: clamp(500px, 69vh, 900px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px var(--carousel-edge) 14px;
   display: flex;
-  flex-direction: column;
-  gap: 12px;
-  scroll-snap-type: y mandatory;
-  scroll-padding-top: 10px;
-  scroll-padding-bottom: 22px;
-  overscroll-behavior-y: contain;
+  flex-direction: row;
+  align-items: stretch;
+  gap: var(--carousel-gap);
+  scroll-snap-type: x mandatory;
+  scroll-padding-inline-start: var(--carousel-edge);
+  scroll-padding-inline-end: calc(var(--carousel-peek) + var(--carousel-edge));
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: none;
   touch-action: pan-y;
   cursor: grab;
   scrollbar-width: thin;
@@ -334,7 +349,7 @@ a {
 }
 
 .feedViewport::-webkit-scrollbar {
-  width: 10px;
+  height: 10px;
 }
 
 .feedViewport::-webkit-scrollbar-thumb {
@@ -343,15 +358,20 @@ a {
 }
 
 .feedCard {
+  flex: 0 0 calc(100% - var(--carousel-peek) - var(--carousel-gap));
+  max-width: calc(100% - var(--carousel-peek) - var(--carousel-gap));
+  height: 100%;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: #ffffff;
   box-shadow: var(--shadow-soft);
-  min-height: clamp(360px, 48vh, 540px);
+  overflow-y: auto;
   scroll-snap-align: start;
   scroll-snap-stop: always;
-  scroll-margin-top: 10px;
+  scroll-margin-inline-start: var(--carousel-edge);
+  scrollbar-width: thin;
+  scrollbar-color: #d8ddea transparent;
   transition: border-color 170ms ease, box-shadow 170ms ease, transform 170ms ease;
 }
 
@@ -698,12 +718,16 @@ a {
 }
 
 .emptyFeed {
+  flex: 0 0 100%;
+  height: 100%;
   min-height: 280px;
   border: 1px dashed #cfd6e6;
   border-radius: var(--radius-lg);
   background: #fcfdff;
   display: grid;
   place-items: center;
+  max-width: none;
+  margin: 0;
   text-align: center;
   padding: 18px;
   color: var(--muted);
@@ -762,7 +786,8 @@ summary:focus-visible {
   }
 
   .feedViewport {
-    height: clamp(500px, 74vh, 760px);
+    min-height: clamp(470px, 66vh, 760px);
+    --carousel-peek: clamp(20px, 5.5vw, 52px);
   }
 }
 
@@ -806,7 +831,9 @@ summary:focus-visible {
   }
 
   .feedViewport {
-    height: clamp(440px, 70vh, 680px);
+    min-height: clamp(410px, 64vh, 660px);
+    --carousel-gap: 10px;
+    --carousel-peek: clamp(16px, 6vw, 32px);
   }
 
   .donutRow {
@@ -819,6 +846,6 @@ summary:focus-visible {
   }
 
   .feedCard {
-    min-height: clamp(320px, 52vh, 470px);
+    border-radius: 16px;
   }
 }
