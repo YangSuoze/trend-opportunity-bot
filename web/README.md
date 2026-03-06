@@ -1,6 +1,6 @@
 # Trend Opportunity Viewer (web)
 
-A local React + TypeScript UI to view and run `trend-opportunity-bot` workflows.
+A local React + TypeScript UI focused on **today's API results** for `trend-opportunity-bot`.
 
 ## Run
 
@@ -17,25 +17,34 @@ pnpm dev
 Then open the dev URL (usually http://localhost:5173).
 
 ## Use
-- API mode is default: run `Collect`, `Analyze`, `Report` from the left run panel.
-- Local file mode keeps the existing file picker flow for `opportunities.jsonl`, `signals.jsonl`, and `report.md`.
-- Use left-side filters (`source`, `min score`, `keyword`) to narrow cards.
-- The main area is now a vertical card feed with one-card snap scrolling:
-  - Mouse wheel / trackpad snaps to the next or previous card.
-  - Keyboard navigation in feed: `ArrowUp`, `ArrowDown`, `PageUp`, `PageDown`, `Home`, `End`.
+- UI is API-only now.
+- Mode switching (API/file), left-side config forms, and run panels are removed.
+- The page auto-fetches artifacts on startup and shows only local-today data.
+- A compact header shows `Last updated` and a manual `Refresh` button.
 
-## Dashboard Style Notes
-- Xiaohongshu creator dashboard visual language: white canvas, clean spacing, and card-first structure.
-- Accent color is fixed to brand red `#FF2442`; Bauhaus yellow/blue blocks are removed.
-- Surfaces use large rounded corners and soft layered shadows instead of hard borders.
-- Mode switching follows a segmented-control pattern with a muted track and elevated active segment.
-- Data modules are tuned for dashboard readability:
-  - Inline donut chart for six scoring dimensions.
-  - Progress bars and qualitative signal blocks with red gradient fill and soft tracks.
-- Opportunity cards remain information-dense but lightweight:
-  - Big total score, `zh_summary`, source badge + source title link.
-  - Expand/collapse detail area for `trigger`, `pain`, `alternatives`, `pricing_reason`, `zh_analysis`.
+## Today's Filtering Rules
+- Signals:
+  - Use `captured_at` when present.
+  - If `captured_at` is missing/invalid, treat that signal as today.
+- Opportunities:
+  - Use `generated_at` when present.
+  - If missing/invalid, fallback to matching source artifact timestamp from signals (`source_fingerprint`, then `source_url`).
+  - If still unavailable, treat that opportunity as today.
 
-## Notes
-- API mode auto-refreshes opportunities/report after each finished job.
-- Local file mode still cannot tail files; click **Reload** to re-read selected files.
+All comparisons use **local time** day boundaries.
+
+## Auto Refresh Schedule
+- Startup: fetches API artifacts immediately.
+- Morning open: before 09:00 local time, startup fetch ensures the page has a daily pre-09:00 refresh.
+- Long-running tab: schedules an automatic refresh at 09:00 local time, then repeats daily at 09:00.
+
+## Interaction
+- Main area remains a one-card-at-a-time vertical feed.
+- Snap interaction is preserved:
+  - Mouse wheel / trackpad snaps to previous/next card.
+  - Drag/swipe is supported on desktop and mobile.
+  - Keyboard navigation: `ArrowUp`, `ArrowDown`, `PageUp`, `PageDown`, `Home`, `End`.
+
+## Mobile
+- Layout is single-column and responsive.
+- Tap targets are enlarged for touch usage.

@@ -9,19 +9,13 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import './App.css'
-import { parseOpportunitiesJsonl, parseSignalsJsonl } from './parsers'
 import type { OpportunityCard, OpportunityScoring, SignalRecord } from './types'
-import { useFileText } from './useFileText'
 
 const DEFAULT_API_BASE = import.meta.env.VITE_TRENDBOT_API_BASE ?? 'http://127.0.0.1:8000'
 const SNAP_LOCK_MS = 340
 const DRAG_START_THRESHOLD_PX = 6
 const DRAG_CLICK_SUPPRESS_MS = 140
 
-type ViewMode = 'api' | 'file'
-type JobKind = 'collect' | 'analyze' | 'report'
-type JobStatus = 'queued' | 'running' | 'done' | 'error'
-type EventType = 'progress' | 'card' | 'done' | 'error' | 'system'
 type ScoreDimensionKey = Exclude<keyof OpportunityScoring, 'total'>
 
 interface ApiStatusPayload {
@@ -33,17 +27,6 @@ interface ApiStatusPayload {
   }
 }
 
-interface JobState {
-  id: string
-  kind: JobKind
-  status: JobStatus
-}
-
-interface JobLogEntry {
-  type: EventType
-  message: string
-}
-
 interface FeedDragState {
   pointerId: number
   startY: number
@@ -51,8 +34,13 @@ interface FeedDragState {
   moved: boolean
 }
 
+interface OpportunityWithTimestamp {
+  card: OpportunityCard
+  timestamp: Date | null
+}
+
 const SCORE_DIMENSIONS: Array<{ key: ScoreDimensionKey; label: string; color: string }> = [
-  { key: 'demand', label: 'Demand', color: '#FF2442' },
+  { key: 'demand', label: 'Demand', color: '#ff2442' },
   { key: 'urgency', label: 'Urgency', color: '#ff4f66' },
   { key: 'distribution', label: 'Distribution', color: '#ff6f80' },
   { key: 'feasibility', label: 'Feasibility', color: '#ff8b9a' },
@@ -62,10 +50,6 @@ const SCORE_DIMENSIONS: Array<{ key: ScoreDimensionKey; label: string; color: st
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
-}
-
-function uniq(values: string[]) {
-  return Array.from(new Set(values))
 }
 
 function normalize(s: string) {
@@ -96,16 +80,26 @@ function totalScore(card: OpportunityCard) {
   return Number.isFinite(value) ? value : 0
 }
 
-function parseSseData(raw: string): Record<string, unknown> {
-  try {
-    const value = JSON.parse(raw)
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return value as Record<string, unknown>
-    }
-  } catch {
-    return {}
-  }
-  return {}
+function parseIsoTimestamp(value?: string) {
+  if (!value) return null
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function toLocalDayKey(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function dayKeyToDate(dayKey: string) {
+  const [year, month, day] = dayKey.split('-').map(Number)
+  return new Date(year, month - 1, day)
+}
+
+function isSameLocalDay(date: Date, dayKey: string) {
+  return toLocalDayKey(date) === dayKey
 }
 
 function polarToCartesian(cx: number, cy: number, radius: number, angle: number) {
@@ -174,6 +168,27 @@ function fallbackBlockCount(value: string, blockCount: number) {
 
 function cardKey(card: OpportunityCard, index: number) {
   return card.source_fingerprint || card.source_url || `${card.source}-${card.solution}-${index}`
+}
+
+function resolveOpportunityTimestamp(
+  opportunity: OpportunityCard,
+  byFingerprint: Map<string, Date>,
+  byUrl: Map<string, Date>,
+) {
+  const generatedAt = parseIsoTimestamp(opportunity.generated_at)
+  if (generatedAt) return generatedAt
+
+  if (opportunity.source_fingerprint) {
+    const sourceTimestamp = byFingerprint.get(opportunity.source_fingerprint)
+    if (sourceTimestamp) return sourceTimestamp
+  }
+
+  if (opportunity.source_url) {
+    const sourceTimestamp = byUrl.get(opportunity.source_url)
+    if (sourceTimestamp) return sourceTimestamp
+  }
+
+  return null
 }
 
 function ScoreDonut({ scoring }: { scoring: OpportunityScoring }) {
@@ -246,18 +261,6 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T
 }
 
-async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`)
-  }
-  return (await response.json()) as T
-}
-
 async function fetchText(url: string): Promise<string> {
   const response = await fetch(url)
   if (!response.ok) {
@@ -267,79 +270,44 @@ async function fetchText(url: string): Promise<string> {
 }
 
 export default function App() {
-  const opportunitiesFile = useFileText()
-  const signalsFile = useFileText()
-  const reportFile = useFileText()
-
-  const opportunitiesText = opportunitiesFile.loaded?.text ?? ''
-  const signalsText = signalsFile.loaded?.text ?? ''
-
-  const [mode, setMode] = useState<ViewMode>('api')
-  const [apiBase] = useState(DEFAULT_API_BASE)
+  const apiBase = DEFAULT_API_BASE
 
   const [apiStatus, setApiStatus] = useState<ApiStatusPayload | null>(null)
   const [apiOpportunities, setApiOpportunities] = useState<OpportunityCard[]>([])
   const [apiSignals, setApiSignals] = useState<SignalRecord[]>([])
-  const [apiReport, setApiReport] = useState<string>('')
-  const [apiError, setApiError] = useState<string>('')
+  const [apiError, setApiError] = useState('')
   const [isApiLoading, setIsApiLoading] = useState(false)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null)
 
-  const [collectWindow, setCollectWindow] = useState('24h')
-  const [collectLimit, setCollectLimit] = useState(30)
-  const [analyzeTop, setAnalyzeTop] = useState(30)
-  const [analyzeResume, setAnalyzeResume] = useState(true)
-
-  const [activeJob, setActiveJob] = useState<JobState | null>(null)
-  const [jobEvents, setJobEvents] = useState<JobLogEntry[]>([])
-  const [jobError, setJobError] = useState('')
-  const [isSubmittingJob, setIsSubmittingJob] = useState(false)
-
-  const [sourceFilter, setSourceFilter] = useState<string>('')
-  const [minScore, setMinScore] = useState<number>(0)
-  const [keyword, setKeyword] = useState<string>('')
+  const [todayKey, setTodayKey] = useState(() => toLocalDayKey(new Date()))
   const [activeIndex, setActiveIndex] = useState(0)
   const [isDraggingFeed, setIsDraggingFeed] = useState(false)
 
-  const eventSourceRef = useRef<EventSource | null>(null)
   const feedRef = useRef<HTMLDivElement | null>(null)
   const activeIndexRef = useRef(0)
   const wheelLockRef = useRef(false)
   const feedDragRef = useRef<FeedDragState | null>(null)
   const suppressFeedClickUntilRef = useRef(0)
 
-  const closeEventStream = useCallback(() => {
-    eventSourceRef.current?.close()
-    eventSourceRef.current = null
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      closeEventStream()
-    }
-  }, [closeEventStream])
-
-  const appendJobEvent = useCallback((entry: JobLogEntry) => {
-    setJobEvents((current) => {
-      const next = [...current, entry]
-      return next.length > 120 ? next.slice(next.length - 120) : next
-    })
-  }, [])
-
   const refreshApiArtifacts = useCallback(async () => {
     setIsApiLoading(true)
     setApiError('')
+
     try {
-      const [statusPayload, signalsPayload, opportunitiesPayload, reportPayload] = await Promise.all([
+      const [statusPayload, signalsPayload, opportunitiesPayload] = await Promise.all([
         fetchJson<ApiStatusPayload>(`${apiBase}/api/status`),
         fetchJson<SignalRecord[]>(`${apiBase}/api/artifacts/signals`),
         fetchJson<OpportunityCard[]>(`${apiBase}/api/artifacts/opportunities`),
-        fetchText(`${apiBase}/api/artifacts/report`),
       ])
+
+      // Trigger report endpoint fetch as part of startup/refresh artifact sync.
+      void fetchText(`${apiBase}/api/artifacts/report`).catch(() => '')
 
       setApiStatus(statusPayload)
       setApiSignals(Array.isArray(signalsPayload) ? signalsPayload : [])
       setApiOpportunities(Array.isArray(opportunitiesPayload) ? opportunitiesPayload : [])
-      setApiReport(reportPayload)
+      setLastUpdatedAt(new Date())
+      setTodayKey(toLocalDayKey(new Date()))
     } catch (error) {
       setApiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -348,172 +316,131 @@ export default function App() {
   }, [apiBase])
 
   useEffect(() => {
-    if (mode !== 'api') return
     void refreshApiArtifacts()
-  }, [mode, refreshApiArtifacts])
+  }, [refreshApiArtifacts])
 
-  const finalizeJob = useCallback(
-    async (jobId: string) => {
-      try {
-        const snapshot = await fetchJson<{ status: JobStatus; error?: string }>(`${apiBase}/api/jobs/${jobId}`)
-        setActiveJob((current) => {
-          if (!current || current.id !== jobId) return current
-          return { ...current, status: snapshot.status }
-        })
-        if (snapshot.status === 'error' && snapshot.error) {
-          setJobError(snapshot.error)
-        }
-      } catch {
-        setJobError('Failed to fetch final job status.')
+  useEffect(() => {
+    let timeoutId = 0
+    let cancelled = false
+
+    const scheduleNextNineAmRefresh = () => {
+      if (cancelled) return
+
+      const now = new Date()
+      const next = new Date(now)
+      next.setHours(9, 0, 0, 0)
+
+      if (next <= now) {
+        next.setDate(next.getDate() + 1)
       }
 
-      closeEventStream()
-      if (mode === 'api') {
-        await refreshApiArtifacts()
-      }
-    },
-    [apiBase, closeEventStream, mode, refreshApiArtifacts],
-  )
-
-  const connectJobStream = useCallback(
-    (job: JobState) => {
-      closeEventStream()
-      const source = new EventSource(`${apiBase}/api/jobs/${job.id}/events`)
-      eventSourceRef.current = source
-
-      source.addEventListener('progress', (event) => {
-        const data = parseSseData((event as MessageEvent<string>).data)
-        const i = Number(data.i ?? 0)
-        const total = Number(data.total ?? 0)
-        const title = String(data.title ?? '')
-        const sourceName = String(data.source ?? '')
-        appendJobEvent({
-          type: 'progress',
-          message: `[${i}/${total}] ${title} (source=${sourceName})`,
+      const delay = Math.max(next.getTime() - now.getTime(), 1000)
+      timeoutId = window.setTimeout(() => {
+        void refreshApiArtifacts().finally(() => {
+          scheduleNextNineAmRefresh()
         })
-      })
+      }, delay)
+    }
 
-      source.addEventListener('card', (event) => {
-        const data = parseSseData((event as MessageEvent<string>).data)
-        const cardPayload = data.card
-        const card =
-          cardPayload && typeof cardPayload === 'object' && !Array.isArray(cardPayload)
-            ? (cardPayload as Partial<OpportunityCard>)
-            : null
+    scheduleNextNineAmRefresh()
 
-        appendJobEvent({
-          type: 'card',
-          message: card ? `new card: ${card.solution ?? 'untitled card'}` : 'new card received',
-        })
-      })
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [refreshApiArtifacts])
 
-      source.addEventListener('done', (event) => {
-        const data = parseSseData((event as MessageEvent<string>).data)
-        const counts = data.counts ? JSON.stringify(data.counts) : '{}'
-        appendJobEvent({ type: 'done', message: `done: ${counts}` })
-        void finalizeJob(job.id)
-      })
+  useEffect(() => {
+    let timeoutId = 0
+    let cancelled = false
 
-      source.addEventListener('error', (event) => {
-        const maybeData = (event as MessageEvent<string>).data
-        if (typeof maybeData === 'string' && maybeData.trim()) {
-          const data = parseSseData(maybeData)
-          const message = String(data.message ?? 'job error')
-          appendJobEvent({ type: 'error', message })
-          return
-        }
+    const scheduleMidnightTick = () => {
+      if (cancelled) return
 
-        if (source.readyState === EventSource.CLOSED) {
-          appendJobEvent({ type: 'system', message: 'job stream closed' })
-          void finalizeJob(job.id)
-        }
-      })
-    },
-    [apiBase, appendJobEvent, closeEventStream, finalizeJob],
-  )
+      const now = new Date()
+      const nextMidnight = new Date(now)
+      nextMidnight.setHours(24, 0, 0, 0)
 
-  const startJob = useCallback(
-    async (kind: JobKind, body: Record<string, unknown>) => {
-      if (mode !== 'api') return
+      const delay = Math.max(nextMidnight.getTime() - now.getTime() + 1000, 1000)
+      timeoutId = window.setTimeout(() => {
+        setTodayKey(toLocalDayKey(new Date()))
+        scheduleMidnightTick()
+      }, delay)
+    }
 
-      setJobError('')
-      setJobEvents([])
-      setIsSubmittingJob(true)
+    scheduleMidnightTick()
 
-      try {
-        const payload = await postJson<{ jobId: string }>(`${apiBase}/api/${kind}`, body)
-        const nextJob: JobState = { id: payload.jobId, kind, status: 'running' }
-        setActiveJob(nextJob)
-        appendJobEvent({ type: 'system', message: `started ${kind} job ${payload.jobId}` })
-        connectJobStream(nextJob)
-      } catch (error) {
-        setJobError(error instanceof Error ? error.message : String(error))
-      } finally {
-        setIsSubmittingJob(false)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [])
+
+  const signalTimestampLookup = useMemo(() => {
+    const byFingerprint = new Map<string, Date>()
+    const byUrl = new Map<string, Date>()
+
+    apiSignals.forEach((signal) => {
+      const timestamp = parseIsoTimestamp(signal.captured_at)
+      if (!timestamp) return
+
+      if (signal.fingerprint) {
+        byFingerprint.set(signal.fingerprint, timestamp)
       }
-    },
-    [apiBase, appendJobEvent, connectJobStream, mode],
-  )
 
-  const opportunitiesParse = useMemo(() => {
-    if (mode !== 'file' || !opportunitiesText) return null
-    return parseOpportunitiesJsonl(opportunitiesText)
-  }, [mode, opportunitiesText])
-
-  const signalsParse = useMemo(() => {
-    if (mode !== 'file' || !signalsText) return null
-    return parseSignalsJsonl(signalsText)
-  }, [mode, signalsText])
-
-  const reportText = mode === 'api' ? apiReport : reportFile.loaded?.text ?? ''
-
-  const opportunities = useMemo(() => {
-    const rows = mode === 'api' ? apiOpportunities : opportunitiesParse?.records ?? []
-    return [...rows].sort((a, b) => totalScore(b) - totalScore(a))
-  }, [apiOpportunities, mode, opportunitiesParse?.records])
-
-  const sources = useMemo(() => {
-    return uniq(opportunities.map((o) => o.source)).sort()
-  }, [opportunities])
-
-  const filtered = useMemo(() => {
-    const k = normalize(keyword)
-    return opportunities.filter((o) => {
-      if (sourceFilter && o.source !== sourceFilter) return false
-      if (totalScore(o) < minScore) return false
-      if (!k) return true
-
-      const hay = normalize(
-        [o.solution, o.source_title, o.zh_summary, o.zh_analysis].filter(Boolean).join(' \n '),
-      )
-      return hay.includes(k)
+      if (signal.url) {
+        byUrl.set(signal.url, timestamp)
+      }
     })
-  }, [keyword, minScore, opportunities, sourceFilter])
 
-  const stats = useMemo(() => {
-    const total = opportunities.length
-    const shown = filtered.length
-    const max = opportunities[0] ? totalScore(opportunities[0]) : 0
-    return { total, shown, max }
-  }, [filtered.length, opportunities])
+    return { byFingerprint, byUrl }
+  }, [apiSignals])
 
-  const isJobBusy =
-    isSubmittingJob ||
-    (activeJob ? activeJob.status === 'running' || activeJob.status === 'queued' : false)
+  const todaySignals = useMemo(() => {
+    return apiSignals.filter((signal) => {
+      const timestamp = parseIsoTimestamp(signal.captured_at)
+      return !timestamp || isSameLocalDay(timestamp, todayKey)
+    })
+  }, [apiSignals, todayKey])
 
-  const signalsCount = mode === 'api' ? apiSignals.length : signalsParse?.records.length ?? 0
+  const todayOpportunities = useMemo<OpportunityWithTimestamp[]>(() => {
+    return apiOpportunities
+      .map((card) => {
+        const timestamp = resolveOpportunityTimestamp(
+          card,
+          signalTimestampLookup.byFingerprint,
+          signalTimestampLookup.byUrl,
+        )
+        return { card, timestamp }
+      })
+      .filter((entry) => !entry.timestamp || isSameLocalDay(entry.timestamp, todayKey))
+      .sort((a, b) => totalScore(b.card) - totalScore(a.card))
+  }, [apiOpportunities, signalTimestampLookup, todayKey])
 
-  const onPick = async (kind: 'opps' | 'signals' | 'report', file: File) => {
-    if (kind === 'opps') await opportunitiesFile.load(file)
-    if (kind === 'signals') await signalsFile.load(file)
-    if (kind === 'report') await reportFile.load(file)
-  }
+  const signalSourceSummary = useMemo(() => {
+    const bySource = new Map<string, number>()
 
-  const reloadFiles = async () => {
-    await opportunitiesFile.reload()
-    await signalsFile.reload()
-    await reportFile.reload()
-  }
+    todaySignals.forEach((signal) => {
+      bySource.set(signal.source, (bySource.get(signal.source) ?? 0) + 1)
+    })
+
+    return Array.from(bySource.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+  }, [todaySignals])
+
+  const dateFormatter = useMemo(() => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }), [])
+  const dateTimeFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      }),
+    [],
+  )
+
+  const todayLabel = dateFormatter.format(dayKeyToDate(todayKey))
+  const lastUpdatedLabel = lastUpdatedAt ? dateTimeFormatter.format(lastUpdatedAt) : 'Not yet synced'
 
   const getFeedCards = useCallback(() => {
     const container = feedRef.current
@@ -540,7 +467,7 @@ export default function App() {
 
   const onFeedKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
-      if (!filtered.length) return
+      if (!todayOpportunities.length) return
 
       if (event.key === 'ArrowDown' || event.key === 'PageDown') {
         event.preventDefault()
@@ -559,10 +486,10 @@ export default function App() {
 
       if (event.key === 'End') {
         event.preventDefault()
-        scrollToCard(filtered.length - 1)
+        scrollToCard(todayOpportunities.length - 1)
       }
     },
-    [filtered.length, scrollToCard],
+    [scrollToCard, todayOpportunities.length],
   )
 
   const findNearestCardIndex = useCallback(() => {
@@ -658,18 +585,18 @@ export default function App() {
   }, [activeIndex])
 
   useEffect(() => {
-    if (!filtered.length) {
+    if (!todayOpportunities.length) {
       setActiveIndex(0)
       activeIndexRef.current = 0
       return
     }
 
-    const next = clamp(activeIndexRef.current, 0, filtered.length - 1)
+    const next = clamp(activeIndexRef.current, 0, todayOpportunities.length - 1)
     if (next !== activeIndexRef.current) {
       activeIndexRef.current = next
       setActiveIndex(next)
     }
-  }, [filtered.length])
+  }, [todayOpportunities.length])
 
   useEffect(() => {
     const container = feedRef.current
@@ -696,21 +623,21 @@ export default function App() {
       container.removeEventListener('scroll', onScroll)
       if (frame) window.cancelAnimationFrame(frame)
     }
-  }, [filtered.length, findNearestCardIndex])
+  }, [todayOpportunities.length, findNearestCardIndex])
 
   useEffect(() => {
     const container = feedRef.current
     if (!container) return
 
     const onWheel = (event: WheelEvent) => {
-      if (filtered.length < 2) return
+      if (todayOpportunities.length < 2) return
       if (Math.abs(event.deltaY) < 5) return
 
       event.preventDefault()
       if (wheelLockRef.current) return
 
       const direction = event.deltaY > 0 ? 1 : -1
-      const nextIndex = clamp(activeIndexRef.current + direction, 0, filtered.length - 1)
+      const nextIndex = clamp(activeIndexRef.current + direction, 0, todayOpportunities.length - 1)
       if (nextIndex === activeIndexRef.current) return
 
       wheelLockRef.current = true
@@ -724,495 +651,188 @@ export default function App() {
     return () => {
       container.removeEventListener('wheel', onWheel)
     }
-  }, [filtered.length, scrollToCard])
-
-  const resetFilters = () => {
-    setSourceFilter('')
-    setMinScore(0)
-    setKeyword('')
-    setActiveIndex(0)
-    activeIndexRef.current = 0
-    if (feedRef.current) {
-      feedRef.current.scrollTo({ top: 0, behavior: 'smooth' })
-    }
-  }
+  }, [scrollToCard, todayOpportunities.length])
 
   return (
-    <div className="dashboardShell">
-      <header className="topBar cardSurface">
-        <div className="brandBlock">
-          <p className="brandLabel">Trend Opportunity Dashboard</p>
-          <h1>Opportunity Intelligence Feed</h1>
+    <div className="todayShell">
+      <header className="cardSurface todayHeader">
+        <div className="titleBlock">
+          <p className="titleEyebrow">Trend Opportunity Dashboard</p>
+          <h1>Today&apos;s Results</h1>
           <p>
-            Clean card-based workflow for API jobs and local file review. Scroll one card at a
-            time to inspect opportunities with compact scoring visuals.
+            Showing opportunities and signals for <strong>{todayLabel}</strong> in local time.
           </p>
         </div>
-        <div className="topStats" aria-label="dashboard stats">
-          <div className="statCard">
-            <span>Cards</span>
-            <strong>{stats.total}</strong>
-          </div>
-          <div className="statCard">
-            <span>Shown</span>
-            <strong>{stats.shown}</strong>
-          </div>
-          <div className="statCard">
-            <span>Max Score</span>
-            <strong>{stats.max}</strong>
-          </div>
-          <div className="statCard">
-            <span>Signals</span>
-            <strong>{signalsCount}</strong>
-          </div>
+
+        <div className="headerControls">
+          <p className="lastUpdated">
+            Last updated: <span>{lastUpdatedLabel}</span>
+            {apiStatus ? <small>API v{apiStatus.version}</small> : null}
+          </p>
+          <button
+            type="button"
+            className="btn btnSecondary"
+            onClick={() => void refreshApiArtifacts()}
+            disabled={isApiLoading}
+          >
+            {isApiLoading ? 'Refreshing…' : 'Refresh'}
+          </button>
         </div>
       </header>
 
-      <div className="dashboardLayout">
-        <aside className="leftRail">
-          <section className="cardSurface controlCard">
-            <div className="cardHeading">
-              <h2>Mode</h2>
-              <p>Switch between API backend and local files.</p>
+      {apiError ? <p className="warnText">API error: {apiError}</p> : null}
+
+      <main className="feedColumn">
+        <section className="cardSurface feedPanel">
+          <div className="cardHeading cardHeadingRow">
+            <div>
+              <h2>Opportunity Card Feed</h2>
+              <p>
+                {todayOpportunities.length} opportunities • {todaySignals.length} signals captured today.
+              </p>
             </div>
-            <div className="modeToggle">
-              <button
-                type="button"
-                className={`btn ${mode === 'api' ? 'btnPrimary' : 'btnSecondary'}`}
-                onClick={() => setMode('api')}
-              >
-                API mode
-              </button>
-              <button
-                type="button"
-                className={`btn ${mode === 'file' ? 'btnPrimary' : 'btnSecondary'}`}
-                onClick={() => setMode('file')}
-              >
-                File mode
-              </button>
-            </div>
-            <p className="metaLine">API base: {apiBase}</p>
-          </section>
+            <span className="statusBadge">
+              {todayOpportunities.length ? `${activeIndex + 1} / ${todayOpportunities.length}` : '0 / 0'}
+            </span>
+          </div>
 
-          {mode === 'api' ? (
-            <section className="cardSurface controlCard">
-              <div className="cardHeading">
-                <h2>Run Pipeline</h2>
-                <p>Launch collect/analyze/report and stream live events.</p>
-              </div>
-
-              <div className="fieldGrid">
-                <label className="fieldGroup">
-                  <span>Collect window</span>
-                  <input
-                    type="text"
-                    value={collectWindow}
-                    onChange={(event) => setCollectWindow(event.target.value)}
-                    placeholder="24h"
-                  />
-                </label>
-
-                <label className="fieldGroup">
-                  <span>Collect limit</span>
-                  <input
-                    type="number"
-                    value={collectLimit}
-                    min={1}
-                    max={500}
-                    onChange={(event) =>
-                      setCollectLimit(clamp(Number(event.target.value) || 1, 1, 500))
-                    }
-                  />
-                </label>
-
-                <label className="fieldGroup">
-                  <span>Analyze top</span>
-                  <input
-                    type="number"
-                    value={analyzeTop}
-                    min={1}
-                    max={500}
-                    onChange={(event) =>
-                      setAnalyzeTop(clamp(Number(event.target.value) || 1, 1, 500))
-                    }
-                  />
-                </label>
-
-                <label className="fieldGroup checkboxGroup" htmlFor="resumeToggle">
-                  <span>Analyze resume</span>
-                  <div className="checkboxRow">
-                    <input
-                      id="resumeToggle"
-                      type="checkbox"
-                      checked={analyzeResume}
-                      onChange={(event) => setAnalyzeResume(event.target.checked)}
-                    />
-                    <p>Skip already analyzed fingerprints.</p>
-                  </div>
-                </label>
-              </div>
-
-              <div className="buttonRow">
-                <button
-                  type="button"
-                  className="btn btnPrimary"
-                  onClick={() =>
-                    void startJob('collect', {
-                      window: collectWindow.trim() || '24h',
-                      limit: clamp(collectLimit, 1, 500),
-                    })
-                  }
-                  disabled={isJobBusy}
-                >
-                  Collect
-                </button>
-                <button
-                  type="button"
-                  className="btn btnSecondary"
-                  onClick={() =>
-                    void startJob('analyze', {
-                      top: clamp(analyzeTop, 1, 500),
-                      resume: analyzeResume,
-                    })
-                  }
-                  disabled={isJobBusy}
-                >
-                  Analyze
-                </button>
-                <button
-                  type="button"
-                  className="btn btnSecondary"
-                  onClick={() => void startJob('report', {})}
-                  disabled={isJobBusy}
-                >
-                  Report
-                </button>
-                <button
-                  type="button"
-                  className="btn btnSecondary"
-                  onClick={() => void refreshApiArtifacts()}
-                  disabled={isApiLoading || isJobBusy}
-                >
-                  Refresh API
-                </button>
-              </div>
-
-              {apiStatus ? (
-                <p className="metaLine">
-                  API v{apiStatus.version} • signals: {apiStatus.artifacts.signals} • opportunities:{' '}
-                  {apiStatus.artifacts.opportunities}
-                </p>
-              ) : null}
-
-              {apiError ? <p className="warnText">API error: {apiError}</p> : null}
-              {jobError ? <p className="warnText">Job error: {jobError}</p> : null}
-
-              <div className="eventLog" role="log" aria-live="polite">
-                {jobEvents.length ? (
-                  jobEvents.map((entry, index) => (
-                    <div key={`${entry.type}-${index}`} className="eventLine" data-type={entry.type}>
-                      {entry.message}
-                    </div>
-                  ))
-                ) : (
-                  <div className="eventLine" data-type="system">
-                    No job events yet.
-                  </div>
-                )}
-              </div>
-
-              <p className="metaLine">
-                Active job:{' '}
-                <span className="statusBadge">
-                  {activeJob ? `${activeJob.kind} • ${activeJob.status}` : 'none'}
+          <div className="signalSummary" aria-label="today signal source summary">
+            {signalSourceSummary.length ? (
+              signalSourceSummary.map(([source, count]) => (
+                <span key={source} className="signalChip">
+                  {source}
+                  <b>{count}</b>
                 </span>
-              </p>
-            </section>
-          ) : (
-            <section className="cardSurface controlCard">
-              <div className="cardHeading">
-                <h2>Files</h2>
-                <p>Pick local artifacts and reload to re-read updates.</p>
-              </div>
+              ))
+            ) : (
+              <span className="signalHint">No signal source counts for today yet.</span>
+            )}
+          </div>
 
-              <div className="fieldGrid">
-                <label className="fieldGroup">
-                  <span>opportunities.jsonl (required)</span>
-                  <input
-                    type="file"
-                    accept=".jsonl,.txt,application/json"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0]
-                      if (file) void onPick('opps', file)
-                    }}
-                  />
-                  <p className="fileMeta">
-                    {opportunitiesFile.loaded
-                      ? `${opportunitiesFile.loaded.name} • ${opportunitiesFile.loaded.size} bytes`
-                      : 'not loaded'}
-                    {opportunitiesFile.error ? ` • ${opportunitiesFile.error}` : ''}
-                  </p>
-                </label>
+          <div
+            ref={feedRef}
+            className={`feedViewport ${isDraggingFeed ? 'isDragging' : ''}`}
+            tabIndex={0}
+            onKeyDown={onFeedKeyDown}
+            onPointerDown={onFeedPointerDown}
+            onPointerMove={onFeedPointerMove}
+            onPointerUp={onFeedPointerRelease}
+            onPointerCancel={onFeedPointerRelease}
+            onClickCapture={onFeedClickCapture}
+            aria-label="Opportunity cards feed"
+          >
+            {todayOpportunities.length ? (
+              todayOpportunities.map(({ card: opportunity, timestamp }, index) => {
+                const score = totalScore(opportunity)
 
-                <label className="fieldGroup">
-                  <span>signals.jsonl (optional)</span>
-                  <input
-                    type="file"
-                    accept=".jsonl,.txt,application/json"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0]
-                      if (file) void onPick('signals', file)
-                    }}
-                  />
-                  <p className="fileMeta">
-                    {signalsFile.loaded ? signalsFile.loaded.name : 'not loaded'}
-                    {signalsFile.error ? ` • ${signalsFile.error}` : ''}
-                  </p>
-                </label>
-
-                <label className="fieldGroup">
-                  <span>report.md (optional)</span>
-                  <input
-                    type="file"
-                    accept=".md,.txt,text/markdown"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0]
-                      if (file) void onPick('report', file)
-                    }}
-                  />
-                  <p className="fileMeta">
-                    {reportFile.loaded ? reportFile.loaded.name : 'not loaded'}
-                    {reportFile.error ? ` • ${reportFile.error}` : ''}
-                  </p>
-                </label>
-              </div>
-
-              <div className="buttonRow buttonRowSingle">
-                <button
-                  type="button"
-                  className="btn btnPrimary"
-                  onClick={() => void reloadFiles()}
-                  disabled={!opportunitiesFile.file && !signalsFile.file && !reportFile.file}
-                >
-                  Reload
-                </button>
-              </div>
-
-              {opportunitiesParse?.warnings?.length ? (
-                <p className="warnText">
-                  Parsed with warnings ({opportunitiesParse.warnings.length}):{' '}
-                  {opportunitiesParse.warnings.slice(0, 3).join(' • ')}
-                </p>
-              ) : null}
-
-              <p className="metaLine">
-                Tip: run <code>trendbot analyze</code>, keep generating <code>opportunities.jsonl</code>,
-                then reload in this panel.
-              </p>
-            </section>
-          )}
-
-          <section className="cardSurface controlCard">
-            <div className="cardHeading">
-              <h2>Filters</h2>
-              <p>Source, score threshold, and keyword matching.</p>
-            </div>
-
-            <div className="fieldGrid">
-              <label className="fieldGroup">
-                <span>Source</span>
-                <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
-                  <option value="">All</option>
-                  {sources.map((source) => (
-                    <option key={source} value={source}>
-                      {source}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="fieldGroup">
-                <span>Min score</span>
-                <input
-                  type="number"
-                  value={minScore}
-                  min={0}
-                  max={30}
-                  onChange={(event) => setMinScore(clamp(Number(event.target.value) || 0, 0, 30))}
-                />
-                <input
-                  type="range"
-                  value={minScore}
-                  min={0}
-                  max={30}
-                  onChange={(event) => setMinScore(Number(event.target.value))}
-                />
-              </label>
-
-              <label className="fieldGroup">
-                <span>Keyword</span>
-                <input
-                  type="text"
-                  value={keyword}
-                  onChange={(event) => setKeyword(event.target.value)}
-                  placeholder="RAG / 价格 / developer"
-                />
-              </label>
-            </div>
-
-            <div className="buttonRow buttonRowSingle">
-              <button type="button" className="btn btnSecondary" onClick={resetFilters}>
-                Reset filters
-              </button>
-            </div>
-
-            {reportText ? (
-              <div className="subPanel">
-                <h3>Report preview</h3>
-                <pre>{reportText.slice(0, 1200)}{reportText.length > 1200 ? '\n\n…' : ''}</pre>
-              </div>
-            ) : null}
-
-            {signalsCount ? (
-              <div className="subPanel">
-                <h3>Signals</h3>
-                <p>{signalsCount} loaded. Signals are currently not joined directly to each card.</p>
-              </div>
-            ) : null}
-          </section>
-        </aside>
-
-        <main className="feedColumn">
-          <section className="cardSurface feedPanel">
-            <div className="cardHeading cardHeadingRow">
-              <div>
-                <h2>Opportunity Card Feed</h2>
-                <p>Wheel snap, drag/swipe, and keyboard controls for quick card scanning.</p>
-              </div>
-              <span className="statusBadge">
-                {filtered.length ? `${activeIndex + 1} / ${filtered.length}` : '0 / 0'}
-              </span>
-            </div>
-
-            <div
-              ref={feedRef}
-              className={`feedViewport ${isDraggingFeed ? 'isDragging' : ''}`}
-              tabIndex={0}
-              onKeyDown={onFeedKeyDown}
-              onPointerDown={onFeedPointerDown}
-              onPointerMove={onFeedPointerMove}
-              onPointerUp={onFeedPointerRelease}
-              onPointerCancel={onFeedPointerRelease}
-              onClickCapture={onFeedClickCapture}
-              aria-label="Opportunity cards feed"
-            >
-              {filtered.length ? (
-                filtered.map((opportunity, index) => {
-                  const score = totalScore(opportunity)
-
-                  return (
-                    <article
-                      key={cardKey(opportunity, index)}
-                      className={`feedCard ${index === activeIndex ? 'isActive' : ''}`}
-                      data-feed-card="true"
-                    >
-                      <div className="feedCardTop">
-                        <div>
-                          <h3>{opportunity.solution}</h3>
-                          <p>{opportunity.zh_summary || '暂无摘要'}</p>
-                        </div>
-                        <div className="scoreStack" aria-label={`total score ${score}`}>
-                          <span>Total score</span>
-                          <strong>{score}</strong>
-                          <small>/ 30</small>
-                        </div>
+                return (
+                  <article
+                    key={cardKey(opportunity, index)}
+                    className={`feedCard ${index === activeIndex ? 'isActive' : ''}`}
+                    data-feed-card="true"
+                  >
+                    <div className="feedCardTop">
+                      <div>
+                        <h3>{opportunity.solution}</h3>
+                        <p>{opportunity.zh_summary || '暂无摘要'}</p>
                       </div>
-
-                      <div className="sourceLine">
-                        <span className="sourceBadge">{opportunity.source}</span>
-                        <a href={opportunity.source_url} target="_blank" rel="noreferrer">
-                          {opportunity.source_title}
-                        </a>
-                        <span className="sourceHost">({linkLabel(opportunity.source_url)})</span>
+                      <div className="scoreStack" aria-label={`total score ${score}`}>
+                        <span>Total score</span>
+                        <strong>{score}</strong>
+                        <small>/ 30</small>
                       </div>
+                    </div>
 
-                      <div className="vizGrid">
-                        <div className="vizCard">
-                          <h4>Scoring</h4>
-                          <div className="donutRow">
-                            <ScoreDonut scoring={opportunity.scoring} />
-                            <div className="dimensionList" role="list">
-                              {SCORE_DIMENSIONS.map((dimension) => {
-                                const value = clamp(Number(opportunity.scoring?.[dimension.key] ?? 0), 0, 5)
-                                return (
-                                  <div key={dimension.key} className="dimensionItem" role="listitem">
-                                    <span>{dimension.label}</span>
-                                    <div className="dimensionTrack">
-                                      <span
-                                        style={{
-                                          width: `${(value / 5) * 100}%`,
-                                          backgroundColor: dimension.color,
-                                        }}
-                                      />
-                                    </div>
-                                    <b>{value}/5</b>
+                    <div className="sourceLine">
+                      <span className="sourceBadge">{opportunity.source}</span>
+                      <a href={opportunity.source_url} target="_blank" rel="noreferrer">
+                        {opportunity.source_title}
+                      </a>
+                      <span className="sourceHost">({linkLabel(opportunity.source_url)})</span>
+                    </div>
+
+                    <p className="cardMetaTime">
+                      {timestamp
+                        ? `Generated ${dateTimeFormatter.format(timestamp)}`
+                        : 'Generated today (fallback to local day)'}
+                    </p>
+
+                    <div className="vizGrid">
+                      <div className="vizCard">
+                        <h4>Scoring</h4>
+                        <div className="donutRow">
+                          <ScoreDonut scoring={opportunity.scoring} />
+                          <div className="dimensionList" role="list">
+                            {SCORE_DIMENSIONS.map((dimension) => {
+                              const value = clamp(Number(opportunity.scoring?.[dimension.key] ?? 0), 0, 5)
+                              return (
+                                <div key={dimension.key} className="dimensionItem" role="listitem">
+                                  <span>{dimension.label}</span>
+                                  <div className="dimensionTrack">
+                                    <span
+                                      style={{
+                                        width: `${(value / 5) * 100}%`,
+                                        backgroundColor: dimension.color,
+                                      }}
+                                    />
                                   </div>
-                                )
-                              })}
-                            </div>
+                                  <b>{value}/5</b>
+                                </div>
+                              )
+                            })}
                           </div>
-                        </div>
-
-                        <div className="vizCard">
-                          <h4>Validation signals</h4>
-                          <SignalMeter label="validation_7d" value={opportunity.validation_7d} />
-                          <SignalMeter label="success_signal" value={opportunity.success_signal} />
                         </div>
                       </div>
 
-                      <details className="detailsPanel">
-                        <summary>Expand full details</summary>
-                        <div className="detailsGrid">
-                          <div>
-                            <h5>target_user</h5>
-                            <p>{opportunity.target_user || '—'}</p>
-                          </div>
-                          <div>
-                            <h5>trigger</h5>
-                            <p>{opportunity.trigger || '—'}</p>
-                          </div>
-                          <div>
-                            <h5>pain</h5>
-                            <p>{opportunity.pain || '—'}</p>
-                          </div>
-                          <div>
-                            <h5>alternatives</h5>
-                            <p>{opportunity.existing_alternatives || '—'}</p>
-                          </div>
-                          <div>
-                            <h5>pricing_reason</h5>
-                            <p>{opportunity.pricing_reason || '—'}</p>
-                          </div>
-                          <div>
-                            <h5>zh_analysis</h5>
-                            <p>{opportunity.zh_analysis || '—'}</p>
-                          </div>
+                      <div className="vizCard">
+                        <h4>Validation signals</h4>
+                        <SignalMeter label="validation_7d" value={opportunity.validation_7d} />
+                        <SignalMeter label="success_signal" value={opportunity.success_signal} />
+                      </div>
+                    </div>
+
+                    <details className="detailsPanel">
+                      <summary>Expand full details</summary>
+                      <div className="detailsGrid">
+                        <div>
+                          <h5>target_user</h5>
+                          <p>{opportunity.target_user || '—'}</p>
                         </div>
-                      </details>
-                    </article>
-                  )
-                })
-              ) : (
-                <div className="emptyFeed" data-feed-card="true">
-                  {mode === 'api'
-                    ? 'No results yet. Run Collect/Analyze from the left panel.'
-                    : 'No results. Load opportunities.jsonl or relax filters.'}
-                </div>
-              )}
-            </div>
-          </section>
-        </main>
-      </div>
+                        <div>
+                          <h5>trigger</h5>
+                          <p>{opportunity.trigger || '—'}</p>
+                        </div>
+                        <div>
+                          <h5>pain</h5>
+                          <p>{opportunity.pain || '—'}</p>
+                        </div>
+                        <div>
+                          <h5>alternatives</h5>
+                          <p>{opportunity.existing_alternatives || '—'}</p>
+                        </div>
+                        <div>
+                          <h5>pricing_reason</h5>
+                          <p>{opportunity.pricing_reason || '—'}</p>
+                        </div>
+                        <div>
+                          <h5>zh_analysis</h5>
+                          <p>{opportunity.zh_analysis || '—'}</p>
+                        </div>
+                      </div>
+                    </details>
+                  </article>
+                )
+              })
+            ) : (
+              <div className="emptyFeed" data-feed-card="true">
+                {isApiLoading
+                  ? 'Loading today\'s opportunities...'
+                  : `No opportunities for ${todayLabel} yet. This view only shows local-today results.`}
+              </div>
+            )}
+          </div>
+        </section>
+      </main>
     </div>
   )
 }
