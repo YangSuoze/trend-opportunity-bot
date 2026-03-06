@@ -9,13 +9,19 @@ from rich.console import Console
 from trendbot.analyzer import AnalyzeError, analyze_file
 from trendbot.collectors import (
     DEFAULT_GITHUB_QUERIES,
+    DevToCollector,
     GitHubCollector,
     HackerNewsCollector,
     ProductHuntCollector,
+    RedditCollector,
+    SubstackCollector,
 )
+from trendbot.collectors.devto import CollectorError as DevToCollectorError
 from trendbot.collectors.github import CollectorError as GitHubCollectorError
 from trendbot.collectors.hackernews import CollectorError as HackerNewsCollectorError
 from trendbot.collectors.producthunt import CollectorError as ProductHuntCollectorError
+from trendbot.collectors.reddit import CollectorError as RedditCollectorError
+from trendbot.collectors.substack import CollectorError as SubstackCollectorError
 from trendbot.config import Settings
 from trendbot.models import Signal
 from trendbot.openai_client import OpenAIClient, OpenAIClientError
@@ -48,12 +54,27 @@ def collect(
         str,
         typer.Option("--hn-mode", help="Hacker News mode: top|new|show"),
     ] = "top",
+    reddit_subreddit: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--reddit-subreddit",
+            help="Reddit subreddit (repeatable, requires REDDIT_CLIENT_ID/SECRET)",
+        ),
+    ] = None,
+    devto_tag: Annotated[
+        list[str] | None,
+        typer.Option("--devto-tag", help="DEV.to tag (repeatable)"),
+    ] = None,
+    substack_feed: Annotated[
+        list[str] | None,
+        typer.Option("--substack-feed", help="Substack RSS feed URL (repeatable)"),
+    ] = None,
     limit: Annotated[
         int,
         typer.Option("--limit", min=1, max=500, help="Max signals per source"),
     ] = 30,
 ) -> None:
-    """Collect trend signals from GitHub, Hacker News, and optional Product Hunt."""
+    """Collect trend signals from available sources and optional API/RSS collectors."""
 
     settings = Settings.load()
     try:
@@ -101,6 +122,67 @@ def collect(
         console.print(
             "[yellow]PRODUCTHUNT_TOKEN not set; skipping Product Hunt collector.[/yellow]"
         )
+
+    selected_reddit_subreddits = (
+        reddit_subreddit if reddit_subreddit else settings.reddit_subreddits
+    )
+    if (
+        settings.reddit_client_id
+        and settings.reddit_client_secret
+        and selected_reddit_subreddits
+    ):
+        reddit_collector = RedditCollector(
+            client_id=settings.reddit_client_id,
+            client_secret=settings.reddit_client_secret,
+            user_agent=settings.reddit_user_agent,
+        )
+        try:
+            reddit_signals = reddit_collector.collect(
+                subreddits=selected_reddit_subreddits,
+                limit=limit,
+                window=window_delta,
+            )
+            all_signals.extend(reddit_signals)
+            console.print(f"[green]Reddit:[/green] collected {len(reddit_signals)} signals")
+        except RedditCollectorError as exc:
+            console.print(f"[yellow]Reddit collector failed:[/yellow] {exc}")
+    else:
+        console.print(
+            "[yellow]Reddit disabled; set REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, "
+            "and REDDIT_SUBREDDITS (or --reddit-subreddit).[/yellow]"
+        )
+
+    selected_devto_tags = devto_tag if devto_tag else settings.devto_tags
+    if selected_devto_tags:
+        devto_collector = DevToCollector()
+        try:
+            devto_signals = devto_collector.collect(
+                tags=selected_devto_tags,
+                limit=limit,
+                window=window_delta,
+            )
+            all_signals.extend(devto_signals)
+            console.print(f"[green]DEV.to:[/green] collected {len(devto_signals)} signals")
+        except DevToCollectorError as exc:
+            console.print(f"[yellow]DEV.to collector failed:[/yellow] {exc}")
+    else:
+        console.print("[yellow]DEVTO_TAGS not set; skipping DEV.to collector.[/yellow]")
+
+    selected_substack_feeds = substack_feed if substack_feed else settings.substack_feeds
+    if selected_substack_feeds:
+        substack_collector = SubstackCollector()
+        try:
+            substack_signals = substack_collector.collect(
+                feed_urls=selected_substack_feeds,
+                limit=limit,
+                window=window_delta,
+            )
+            all_signals.extend(substack_signals)
+            console.print(f"[green]Substack:[/green] collected {len(substack_signals)} signals")
+        except SubstackCollectorError as exc:
+            console.print(f"[yellow]Substack collector failed:[/yellow] {exc}")
+    else:
+        console.print("[yellow]SUBSTACK_FEEDS not set; skipping Substack collector.[/yellow]")
 
     unique_signals = deduplicate_signals(all_signals)
     write_jsonl(out, unique_signals)

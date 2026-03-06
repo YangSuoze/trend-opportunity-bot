@@ -18,15 +18,26 @@ def request_with_retries(
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
+    form_body: dict[str, Any] | None = None,
     retries: int = 3,
     backoff_seconds: float = 1.0,
 ) -> httpx.Response:
+    if json_body is not None and form_body is not None:
+        raise ValueError("json_body and form_body are mutually exclusive")
+
     attempt = 0
 
     while True:
         attempt += 1
         try:
-            response = client.request(method, url, headers=headers, params=params, json=json_body)
+            response = client.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=json_body,
+                data=form_body,
+            )
         except httpx.RequestError as exc:
             if attempt > retries:
                 raise RequestError(f"request failed after {attempt - 1} retries: {exc}") from exc
@@ -57,6 +68,7 @@ def request_json(
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
+    form_body: dict[str, Any] | None = None,
     retries: int = 3,
     backoff_seconds: float = 1.0,
 ) -> Any:
@@ -67,6 +79,7 @@ def request_json(
         headers=headers,
         params=params,
         json_body=json_body,
+        form_body=form_body,
         retries=retries,
         backoff_seconds=backoff_seconds,
     )

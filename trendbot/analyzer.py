@@ -35,6 +35,7 @@ def analyze_signals(
     selected = ranked[:top]
 
     cards: list[OpportunityCard] = []
+    failures: list[str] = []
 
     for index, signal in enumerate(selected):
         user_prompt = _build_user_prompt(signal)
@@ -63,11 +64,15 @@ def analyze_signals(
             )
             cards.append(card)
         except (OpenAIClientError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise AnalyzeError(f"failed to analyze signal '{signal.title}': {exc}") from exc
+            failures.append(f"{signal.title}: {exc}")
+            continue
 
         # Small pause to be friendly to hosted model rate limits.
         if index < len(selected) - 1:
             time.sleep(0.2)
+
+    if not cards and failures:
+        raise AnalyzeError(f"analysis failed for all signals; first error: {failures[0]}")
 
     return cards
 

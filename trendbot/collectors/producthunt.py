@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -48,7 +48,7 @@ class ProductHuntCollector:
         threshold = (
             now - window
             if window
-            else datetime.combine(date.today(), datetime.min.time(), tzinfo=UTC)
+            else datetime.combine(now.date(), datetime.min.time(), tzinfo=UTC)
         )
 
         headers = {
