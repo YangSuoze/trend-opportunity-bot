@@ -1,17 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import './App.css'
 import { parseOpportunitiesJsonl, parseSignalsJsonl } from './parsers'
-import { applyTheme, readTheme, writeTheme, type Theme } from './theme'
-import type { OpportunityCard, SignalRecord } from './types'
+import type { OpportunityCard, OpportunityScoring, SignalRecord } from './types'
 import { useFileText } from './useFileText'
 
 const DEFAULT_API_BASE = import.meta.env.VITE_TRENDBOT_API_BASE ?? 'http://127.0.0.1:8000'
+const SNAP_LOCK_MS = 340
 
 type ViewMode = 'api' | 'file'
 type JobKind = 'collect' | 'analyze' | 'report'
 type JobStatus = 'queued' | 'running' | 'done' | 'error'
-
 type EventType = 'progress' | 'card' | 'done' | 'error' | 'system'
+type ScoreDimensionKey = Exclude<keyof OpportunityScoring, 'total'>
 
 interface ApiStatusPayload {
   version: string
@@ -32,6 +32,15 @@ interface JobLogEntry {
   type: EventType
   message: string
 }
+
+const SCORE_DIMENSIONS: Array<{ key: ScoreDimensionKey; label: string; color: string }> = [
+  { key: 'demand', label: 'Demand', color: '#FF2442' },
+  { key: 'urgency', label: 'Urgency', color: '#ff4f66' },
+  { key: 'distribution', label: 'Distribution', color: '#ff6f80' },
+  { key: 'feasibility', label: 'Feasibility', color: '#ff8b9a' },
+  { key: 'monetization', label: 'Monetization', color: '#f6a6b1' },
+  { key: 'defensibility', label: 'Defensibility', color: '#f3bfc6' },
+]
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
@@ -71,6 +80,136 @@ function parseSseData(raw: string): Record<string, unknown> {
   return {}
 }
 
+function polarToCartesian(cx: number, cy: number, radius: number, angle: number) {
+  const radians = (angle * Math.PI) / 180
+  return {
+    x: cx + radius * Math.cos(radians),
+    y: cy + radius * Math.sin(radians),
+  }
+}
+
+function describeArc(cx: number, cy: number, radius: number, start: number, end: number) {
+  const sweep = end - start
+  if (sweep <= 0.01) return ''
+
+  const startPoint = polarToCartesian(cx, cy, radius, start)
+  const endPoint = polarToCartesian(cx, cy, radius, end)
+  const largeArcFlag = sweep > 180 ? 1 : 0
+
+  return `M ${startPoint.x.toFixed(3)} ${startPoint.y.toFixed(3)} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${endPoint.x.toFixed(3)} ${endPoint.y.toFixed(3)}`
+}
+
+function extractNumericProgress(raw: string): number | null {
+  const value = raw.trim()
+  if (!value) return null
+
+  const percentMatch = value.match(/(\d+(?:\.\d+)?)\s*%/)
+  if (percentMatch) {
+    return clamp(Number(percentMatch[1]) / 100, 0, 1)
+  }
+
+  const fractionMatch = value.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/)
+  if (fractionMatch) {
+    const numerator = Number(fractionMatch[1])
+    const denominator = Number(fractionMatch[2])
+    if (Number.isFinite(numerator) && Number.isFinite(denominator) && denominator > 0) {
+      return clamp(numerator / denominator, 0, 1)
+    }
+  }
+
+  const numericMatch = value.match(/\d+(?:\.\d+)?/)
+  if (!numericMatch) return null
+
+  const numeric = Number(numericMatch[0])
+  if (!Number.isFinite(numeric)) return null
+  if (numeric <= 1) return clamp(numeric, 0, 1)
+  if (numeric <= 5) return clamp(numeric / 5, 0, 1)
+  if (numeric <= 10) return clamp(numeric / 10, 0, 1)
+  if (numeric <= 30) return clamp(numeric / 30, 0, 1)
+  if (numeric <= 100) return clamp(numeric / 100, 0, 1)
+
+  return null
+}
+
+function fallbackBlockCount(value: string, blockCount: number) {
+  const text = normalize(value)
+  if (!text) return 0
+
+  let hash = 0
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0
+  }
+
+  if (blockCount < 3) return blockCount
+  return (hash % (blockCount - 1)) + 2
+}
+
+function cardKey(card: OpportunityCard, index: number) {
+  return card.source_fingerprint || card.source_url || `${card.source}-${card.solution}-${index}`
+}
+
+function ScoreDonut({ scoring }: { scoring: OpportunityScoring }) {
+  const segmentAngle = 360 / SCORE_DIMENSIONS.length
+  const gap = 8
+
+  return (
+    <svg className="scoreDonut" viewBox="0 0 120 120" role="img" aria-label={`score ${scoring.total} out of 30`}>
+      {SCORE_DIMENSIONS.map((dimension, index) => {
+        const rawValue = Number(scoring[dimension.key] ?? 0)
+        const value = clamp(rawValue, 0, 5)
+        const segmentStart = -90 + index * segmentAngle + gap / 2
+        const segmentEnd = -90 + (index + 1) * segmentAngle - gap / 2
+        const valueEnd = segmentStart + (segmentEnd - segmentStart) * (value / 5)
+        const trackPath = describeArc(60, 60, 40, segmentStart, segmentEnd)
+        const valuePath = describeArc(60, 60, 40, segmentStart, valueEnd)
+
+        return (
+          <g key={dimension.key}>
+            {trackPath ? <path className="donutTrack" d={trackPath} /> : null}
+            {valuePath ? <path className="donutValue" d={valuePath} style={{ stroke: dimension.color }} /> : null}
+          </g>
+        )
+      })}
+      <circle className="donutCore" cx="60" cy="60" r="24" />
+      <text className="donutTotal" x="60" y="57" textAnchor="middle">
+        {scoring.total}
+      </text>
+      <text className="donutTotalSub" x="60" y="71" textAnchor="middle">
+        / 30
+      </text>
+    </svg>
+  )
+}
+
+function SignalMeter({ label, value }: { label: string; value: string }) {
+  const ratio = extractNumericProgress(value)
+  const maxBlocks = 6
+  const filledBlocks = ratio === null ? fallbackBlockCount(value, maxBlocks) : Math.round(ratio * maxBlocks)
+
+  return (
+    <div className="signalMeter">
+      <div className="signalMeterTop">
+        <span>{label}</span>
+        {ratio === null ? <b>text signal</b> : <b>{Math.round(ratio * 100)}%</b>}
+      </div>
+
+      {ratio === null ? (
+        <div className="signalBlocks" role="img" aria-label={`${label} qualitative intensity`}>
+          {Array.from({ length: maxBlocks }, (_, i) => (
+            <span key={`${label}-${i}`} className={i < filledBlocks ? 'isOn' : undefined} />
+          ))}
+        </div>
+      ) : (
+        <div className="signalTrack" role="img" aria-label={`${label} ${Math.round(ratio * 100)} percent`}>
+          <span style={{ width: `${ratio <= 0 ? 0 : Math.max(ratio * 100, 8)}%` }} />
+        </div>
+      )}
+
+      <p>{value || '—'}</p>
+    </div>
+  )
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url)
   if (!response.ok) {
@@ -107,7 +246,6 @@ export default function App() {
   const opportunitiesText = opportunitiesFile.loaded?.text ?? ''
   const signalsText = signalsFile.loaded?.text ?? ''
 
-  const [theme, setTheme] = useState<Theme>(() => readTheme())
   const [mode, setMode] = useState<ViewMode>('api')
   const [apiBase] = useState(DEFAULT_API_BASE)
 
@@ -131,14 +269,12 @@ export default function App() {
   const [sourceFilter, setSourceFilter] = useState<string>('')
   const [minScore, setMinScore] = useState<number>(0)
   const [keyword, setKeyword] = useState<string>('')
-  const [selected, setSelected] = useState<OpportunityCard | null>(null)
+  const [activeIndex, setActiveIndex] = useState(0)
 
   const eventSourceRef = useRef<EventSource | null>(null)
-
-  useEffect(() => {
-    applyTheme(theme)
-    writeTheme(theme)
-  }, [theme])
+  const feedRef = useRef<HTMLDivElement | null>(null)
+  const activeIndexRef = useRef(0)
+  const wheelLockRef = useRef(false)
 
   const closeEventStream = useCallback(() => {
     eventSourceRef.current?.close()
@@ -348,165 +484,321 @@ export default function App() {
     await reportFile.reload()
   }
 
-  const themeLabel = theme === 'dark' ? 'Dark' : 'Light'
+  const getFeedCards = useCallback(() => {
+    const container = feedRef.current
+    if (!container) return [] as HTMLDivElement[]
+    return Array.from(container.querySelectorAll<HTMLDivElement>('[data-feed-card="true"]'))
+  }, [])
+
+  const scrollToCard = useCallback(
+    (index: number, behavior: ScrollBehavior = 'smooth') => {
+      const container = feedRef.current
+      if (!container) return
+
+      const cards = getFeedCards()
+      if (!cards.length) return
+
+      const next = clamp(index, 0, cards.length - 1)
+      const target = cards[next]
+      container.scrollTo({ top: Math.max(target.offsetTop - 12, 0), behavior })
+      activeIndexRef.current = next
+      setActiveIndex(next)
+    },
+    [getFeedCards],
+  )
+
+  const onFeedKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (!filtered.length) return
+
+      if (event.key === 'ArrowDown' || event.key === 'PageDown') {
+        event.preventDefault()
+        scrollToCard(activeIndexRef.current + 1)
+      }
+
+      if (event.key === 'ArrowUp' || event.key === 'PageUp') {
+        event.preventDefault()
+        scrollToCard(activeIndexRef.current - 1)
+      }
+
+      if (event.key === 'Home') {
+        event.preventDefault()
+        scrollToCard(0)
+      }
+
+      if (event.key === 'End') {
+        event.preventDefault()
+        scrollToCard(filtered.length - 1)
+      }
+    },
+    [filtered.length, scrollToCard],
+  )
+
+  useEffect(() => {
+    activeIndexRef.current = activeIndex
+  }, [activeIndex])
+
+  useEffect(() => {
+    if (!filtered.length) {
+      setActiveIndex(0)
+      activeIndexRef.current = 0
+      return
+    }
+
+    const next = clamp(activeIndexRef.current, 0, filtered.length - 1)
+    if (next !== activeIndexRef.current) {
+      activeIndexRef.current = next
+      setActiveIndex(next)
+    }
+  }, [filtered.length])
+
+  useEffect(() => {
+    const container = feedRef.current
+    if (!container) return
+
+    let frame = 0
+    const onScroll = () => {
+      if (frame) return
+      frame = window.requestAnimationFrame(() => {
+        frame = 0
+
+        const cards = getFeedCards()
+        if (!cards.length) return
+
+        const anchor = container.scrollTop + container.clientHeight * 0.45
+        let nearestIndex = 0
+        let nearestDistance = Number.POSITIVE_INFINITY
+
+        cards.forEach((card, index) => {
+          const distance = Math.abs(card.offsetTop - anchor)
+          if (distance < nearestDistance) {
+            nearestDistance = distance
+            nearestIndex = index
+          }
+        })
+
+        if (nearestIndex !== activeIndexRef.current) {
+          activeIndexRef.current = nearestIndex
+          setActiveIndex(nearestIndex)
+        }
+      })
+    }
+
+    container.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      container.removeEventListener('scroll', onScroll)
+      if (frame) window.cancelAnimationFrame(frame)
+    }
+  }, [getFeedCards, filtered.length])
+
+  useEffect(() => {
+    const container = feedRef.current
+    if (!container) return
+
+    const onWheel = (event: WheelEvent) => {
+      if (filtered.length < 2) return
+      if (Math.abs(event.deltaY) < 5) return
+
+      event.preventDefault()
+      if (wheelLockRef.current) return
+
+      const direction = event.deltaY > 0 ? 1 : -1
+      const nextIndex = clamp(activeIndexRef.current + direction, 0, filtered.length - 1)
+      if (nextIndex === activeIndexRef.current) return
+
+      wheelLockRef.current = true
+      scrollToCard(nextIndex)
+      window.setTimeout(() => {
+        wheelLockRef.current = false
+      }, SNAP_LOCK_MS)
+    }
+
+    container.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      container.removeEventListener('wheel', onWheel)
+    }
+  }, [filtered.length, scrollToCard])
+
+  const resetFilters = () => {
+    setSourceFilter('')
+    setMinScore(0)
+    setKeyword('')
+    setActiveIndex(0)
+    activeIndexRef.current = 0
+    if (feedRef.current) {
+      feedRef.current.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }
 
   return (
-    <div className="shell">
-      <div className="topbar">
-        <div className="brand">
-          <h1>Trend Opportunity Viewer</h1>
-          <div className="sub">
-            API mode is default (local server at 127.0.0.1). Switch to local file mode to
-            use browser file pickers.
+    <div className="dashboardShell">
+      <header className="topBar cardSurface">
+        <div className="brandBlock">
+          <p className="brandLabel">Trend Opportunity Dashboard</p>
+          <h1>Opportunity Intelligence Feed</h1>
+          <p>
+            Clean card-based workflow for API jobs and local file review. Scroll one card at a
+            time to inspect opportunities with compact scoring visuals.
+          </p>
+        </div>
+        <div className="topStats" aria-label="dashboard stats">
+          <div className="statCard">
+            <span>Cards</span>
+            <strong>{stats.total}</strong>
+          </div>
+          <div className="statCard">
+            <span>Shown</span>
+            <strong>{stats.shown}</strong>
+          </div>
+          <div className="statCard">
+            <span>Max Score</span>
+            <strong>{stats.max}</strong>
+          </div>
+          <div className="statCard">
+            <span>Signals</span>
+            <strong>{signalsCount}</strong>
           </div>
         </div>
-        <div className="pills">
-          <span className="pill pillRed">
-            cards: <b>{stats.total}</b>
-          </span>
-          <span className="pill pillYellow">
-            shown: <b>{stats.shown}</b>
-          </span>
-          <span className="pill pillBlue">
-            max score: <b>{stats.max}</b>
-          </span>
-          <button
-            className="btn btnBlue"
-            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-          >
-            {themeLabel}
-          </button>
-        </div>
-      </div>
+      </header>
 
-      <div className="mainLayout">
-        <div className="controlsColumn">
-          <div className="card modeCard">
-            <div className="sectionTitle sectionTitleBlue">
+      <div className="dashboardLayout">
+        <aside className="leftRail">
+          <section className="cardSurface controlCard">
+            <div className="cardHeading">
               <h2>Mode</h2>
-              <div className="hint">switch between API and file workflows</div>
+              <p>Switch between API backend and local files.</p>
             </div>
             <div className="modeToggle">
               <button
-                className={`btn ${mode === 'api' ? 'btnBlue' : 'btnGhost'}`}
+                type="button"
+                className={`btn ${mode === 'api' ? 'btnPrimary' : 'btnSecondary'}`}
                 onClick={() => setMode('api')}
               >
                 API mode
               </button>
               <button
-                className={`btn ${mode === 'file' ? 'btnYellow' : 'btnGhost'}`}
+                type="button"
+                className={`btn ${mode === 'file' ? 'btnPrimary' : 'btnSecondary'}`}
                 onClick={() => setMode('file')}
               >
-                Local file mode
+                File mode
               </button>
             </div>
-            <div className="small apiMeta">API base: {apiBase}</div>
-          </div>
+            <p className="metaLine">API base: {apiBase}</p>
+          </section>
 
           {mode === 'api' ? (
-            <div className="card runCard">
-              <div className="sectionTitle sectionTitleRed">
-                <h2>Run</h2>
-                <div className="hint">run collect/analyze/report with live SSE progress</div>
+            <section className="cardSurface controlCard">
+              <div className="cardHeading">
+                <h2>Run Pipeline</h2>
+                <p>Launch collect/analyze/report and stream live events.</p>
               </div>
 
-              <div className="row runInputs">
-                <div className="field">
-                  <label>collect window</label>
+              <div className="fieldGrid">
+                <label className="fieldGroup">
+                  <span>Collect window</span>
                   <input
                     type="text"
                     value={collectWindow}
-                    onChange={(e) => setCollectWindow(e.target.value)}
+                    onChange={(event) => setCollectWindow(event.target.value)}
                     placeholder="24h"
                   />
-                </div>
+                </label>
 
-                <div className="field">
-                  <label>collect limit</label>
+                <label className="fieldGroup">
+                  <span>Collect limit</span>
                   <input
                     type="number"
                     value={collectLimit}
                     min={1}
                     max={500}
-                    onChange={(e) => setCollectLimit(clamp(Number(e.target.value) || 1, 1, 500))}
+                    onChange={(event) =>
+                      setCollectLimit(clamp(Number(event.target.value) || 1, 1, 500))
+                    }
                   />
-                </div>
+                </label>
 
-                <div className="field">
-                  <label>analyze top</label>
+                <label className="fieldGroup">
+                  <span>Analyze top</span>
                   <input
                     type="number"
                     value={analyzeTop}
                     min={1}
                     max={500}
-                    onChange={(e) => setAnalyzeTop(clamp(Number(e.target.value) || 1, 1, 500))}
+                    onChange={(event) =>
+                      setAnalyzeTop(clamp(Number(event.target.value) || 1, 1, 500))
+                    }
                   />
-                </div>
+                </label>
 
-                <div className="field checkboxField">
-                  <label htmlFor="resumeToggle">analyze resume</label>
+                <label className="fieldGroup checkboxGroup" htmlFor="resumeToggle">
+                  <span>Analyze resume</span>
                   <div className="checkboxRow">
                     <input
                       id="resumeToggle"
                       type="checkbox"
                       checked={analyzeResume}
-                      onChange={(e) => setAnalyzeResume(e.target.checked)}
+                      onChange={(event) => setAnalyzeResume(event.target.checked)}
                     />
-                    <span className="small">skip already analyzed fingerprints</span>
+                    <p>Skip already analyzed fingerprints.</p>
                   </div>
-                </div>
+                </label>
+              </div>
 
-                <div className="runButtons">
-                  <button
-                    className="btn btnRed"
-                    onClick={() =>
-                      void startJob('collect', {
-                        window: collectWindow.trim() || '24h',
-                        limit: clamp(collectLimit, 1, 500),
-                      })
-                    }
-                    disabled={isJobBusy}
-                  >
-                    Collect
-                  </button>
-                  <button
-                    className="btn btnYellow"
-                    onClick={() =>
-                      void startJob('analyze', {
-                        top: clamp(analyzeTop, 1, 500),
-                        resume: analyzeResume,
-                      })
-                    }
-                    disabled={isJobBusy}
-                  >
-                    Analyze
-                  </button>
-                  <button
-                    className="btn btnBlue"
-                    onClick={() => void startJob('report', {})}
-                    disabled={isJobBusy}
-                  >
-                    Report
-                  </button>
-                  <button
-                    className="btn btnGhost"
-                    onClick={() => void refreshApiArtifacts()}
-                    disabled={isApiLoading || isJobBusy}
-                  >
-                    Refresh API
-                  </button>
-                </div>
+              <div className="buttonRow">
+                <button
+                  type="button"
+                  className="btn btnPrimary"
+                  onClick={() =>
+                    void startJob('collect', {
+                      window: collectWindow.trim() || '24h',
+                      limit: clamp(collectLimit, 1, 500),
+                    })
+                  }
+                  disabled={isJobBusy}
+                >
+                  Collect
+                </button>
+                <button
+                  type="button"
+                  className="btn btnSecondary"
+                  onClick={() =>
+                    void startJob('analyze', {
+                      top: clamp(analyzeTop, 1, 500),
+                      resume: analyzeResume,
+                    })
+                  }
+                  disabled={isJobBusy}
+                >
+                  Analyze
+                </button>
+                <button
+                  type="button"
+                  className="btn btnSecondary"
+                  onClick={() => void startJob('report', {})}
+                  disabled={isJobBusy}
+                >
+                  Report
+                </button>
+                <button
+                  type="button"
+                  className="btn btnSecondary"
+                  onClick={() => void refreshApiArtifacts()}
+                  disabled={isApiLoading || isJobBusy}
+                >
+                  Refresh API
+                </button>
               </div>
 
               {apiStatus ? (
-                <div className="small apiMeta">
+                <p className="metaLine">
                   API v{apiStatus.version} • signals: {apiStatus.artifacts.signals} • opportunities:{' '}
                   {apiStatus.artifacts.opportunities}
-                </div>
+                </p>
               ) : null}
 
-              {apiError ? <div className="small warn apiWarn">API error: {apiError}</div> : null}
-              {jobError ? <div className="small warn apiWarn">job error: {jobError}</div> : null}
+              {apiError ? <p className="warnText">API error: {apiError}</p> : null}
+              {jobError ? <p className="warnText">Job error: {jobError}</p> : null}
 
               <div className="eventLog" role="log" aria-live="polite">
                 {jobEvents.length ? (
@@ -522,91 +814,76 @@ export default function App() {
                 )}
               </div>
 
-              <div className="footer">
+              <p className="metaLine">
                 Active job:{' '}
-                {activeJob ? (
-                  <span className="badge">
-                    {activeJob.kind} • {activeJob.status}
-                  </span>
-                ) : (
-                  <span className="badge">none</span>
-                )}
-              </div>
-            </div>
+                <span className="statusBadge">
+                  {activeJob ? `${activeJob.kind} • ${activeJob.status}` : 'none'}
+                </span>
+              </p>
+            </section>
           ) : (
-            <div className="card filesCard">
-              <div className="sectionTitle sectionTitleRed">
+            <section className="cardSurface controlCard">
+              <div className="cardHeading">
                 <h2>Files</h2>
-                <div className="hint">Browser can't tail local files; use Reload to re-read.</div>
+                <p>Pick local artifacts and reload to re-read updates.</p>
               </div>
 
-              <div className="row">
-                <div className="field">
-                  <label>opportunities.jsonl (required)</label>
+              <div className="fieldGrid">
+                <label className="fieldGroup">
+                  <span>opportunities.jsonl (required)</span>
                   <input
                     type="file"
                     accept=".jsonl,.txt,application/json"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0]
-                      if (f) void onPick('opps', f)
+                    onChange={(event) => {
+                      const file = event.target.files?.[0]
+                      if (file) void onPick('opps', file)
                     }}
                   />
-                  <div className="small">
-                    {opportunitiesFile.loaded ? (
-                      <span className="badge">
-                        {opportunitiesFile.loaded.name} • {opportunitiesFile.loaded.size} bytes
-                      </span>
-                    ) : (
-                      <span className="warn">not loaded</span>
-                    )}
-                    {opportunitiesFile.error ? (
-                      <span className="warn"> • {opportunitiesFile.error}</span>
-                    ) : null}
-                  </div>
-                </div>
+                  <p className="fileMeta">
+                    {opportunitiesFile.loaded
+                      ? `${opportunitiesFile.loaded.name} • ${opportunitiesFile.loaded.size} bytes`
+                      : 'not loaded'}
+                    {opportunitiesFile.error ? ` • ${opportunitiesFile.error}` : ''}
+                  </p>
+                </label>
 
-                <div className="field">
-                  <label>signals.jsonl (optional)</label>
+                <label className="fieldGroup">
+                  <span>signals.jsonl (optional)</span>
                   <input
                     type="file"
                     accept=".jsonl,.txt,application/json"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0]
-                      if (f) void onPick('signals', f)
+                    onChange={(event) => {
+                      const file = event.target.files?.[0]
+                      if (file) void onPick('signals', file)
                     }}
                   />
-                  <div className="small">
-                    {signalsFile.loaded ? (
-                      <span className="badge">{signalsFile.loaded.name}</span>
-                    ) : (
-                      <span className="badge">not loaded</span>
-                    )}
-                    {signalsFile.error ? <span className="warn"> • {signalsFile.error}</span> : null}
-                  </div>
-                </div>
+                  <p className="fileMeta">
+                    {signalsFile.loaded ? signalsFile.loaded.name : 'not loaded'}
+                    {signalsFile.error ? ` • ${signalsFile.error}` : ''}
+                  </p>
+                </label>
 
-                <div className="field">
-                  <label>report.md (optional)</label>
+                <label className="fieldGroup">
+                  <span>report.md (optional)</span>
                   <input
                     type="file"
                     accept=".md,.txt,text/markdown"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0]
-                      if (f) void onPick('report', f)
+                    onChange={(event) => {
+                      const file = event.target.files?.[0]
+                      if (file) void onPick('report', file)
                     }}
                   />
-                  <div className="small">
-                    {reportFile.loaded ? (
-                      <span className="badge">{reportFile.loaded.name}</span>
-                    ) : (
-                      <span className="badge">not loaded</span>
-                    )}
-                    {reportFile.error ? <span className="warn"> • {reportFile.error}</span> : null}
-                  </div>
-                </div>
+                  <p className="fileMeta">
+                    {reportFile.loaded ? reportFile.loaded.name : 'not loaded'}
+                    {reportFile.error ? ` • ${reportFile.error}` : ''}
+                  </p>
+                </label>
+              </div>
 
+              <div className="buttonRow buttonRowSingle">
                 <button
-                  className="btn btnRed"
+                  type="button"
+                  className="btn btnPrimary"
                   onClick={() => void reloadFiles()}
                   disabled={!opportunitiesFile.file && !signalsFile.file && !reportFile.file}
                 >
@@ -615,221 +892,215 @@ export default function App() {
               </div>
 
               {opportunitiesParse?.warnings?.length ? (
-                <div className="small warn parseWarn">
+                <p className="warnText">
                   Parsed with warnings ({opportunitiesParse.warnings.length}):{' '}
                   {opportunitiesParse.warnings.slice(0, 3).join(' • ')}
-                </div>
+                </p>
               ) : null}
 
-              <div className="footer">
-                Tip: while running <code>trendbot analyze</code>, keep generating{' '}
-                <code>opportunities.jsonl</code>, then click Reload here to refresh.
-              </div>
-            </div>
+              <p className="metaLine">
+                Tip: run <code>trendbot analyze</code>, keep generating <code>opportunities.jsonl</code>,
+                then reload in this panel.
+              </p>
+            </section>
           )}
 
-          <div className="card filtersCard">
-            <div className="sectionTitle sectionTitleBlue">
+          <section className="cardSurface controlCard">
+            <div className="cardHeading">
               <h2>Filters</h2>
-              <div className="hint">Search covers solution/source_title/zh_summary/zh_analysis</div>
+              <p>Source, score threshold, and keyword matching.</p>
             </div>
-            <div className="row">
-              <div className="field">
-                <label>Source</label>
-                <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+
+            <div className="fieldGrid">
+              <label className="fieldGroup">
+                <span>Source</span>
+                <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
                   <option value="">All</option>
-                  {sources.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
+                  {sources.map((source) => (
+                    <option key={source} value={source}>
+                      {source}
                     </option>
                   ))}
                 </select>
-              </div>
-              <div className="field">
-                <label>Min score</label>
+              </label>
+
+              <label className="fieldGroup">
+                <span>Min score</span>
                 <input
                   type="number"
                   value={minScore}
                   min={0}
                   max={30}
-                  onChange={(e) => setMinScore(clamp(Number(e.target.value), 0, 30))}
+                  onChange={(event) => setMinScore(clamp(Number(event.target.value) || 0, 0, 30))}
                 />
                 <input
                   type="range"
                   value={minScore}
                   min={0}
                   max={30}
-                  onChange={(e) => setMinScore(Number(e.target.value))}
+                  onChange={(event) => setMinScore(Number(event.target.value))}
                 />
-              </div>
-              <div className="field fieldWide">
-                <label>Keyword</label>
+              </label>
+
+              <label className="fieldGroup">
+                <span>Keyword</span>
                 <input
                   type="text"
-                  placeholder="e.g. RAG / 价格 / developer"
                   value={keyword}
-                  onChange={(e) => setKeyword(e.target.value)}
+                  onChange={(event) => setKeyword(event.target.value)}
+                  placeholder="RAG / 价格 / developer"
                 />
-              </div>
-              <button
-                className="btn btnYellow"
-                onClick={() => {
-                  setSourceFilter('')
-                  setMinScore(0)
-                  setKeyword('')
-                }}
-              >
-                Reset
+              </label>
+            </div>
+
+            <div className="buttonRow buttonRowSingle">
+              <button type="button" className="btn btnSecondary" onClick={resetFilters}>
+                Reset filters
               </button>
             </div>
 
             {reportText ? (
-              <div className="auxSection reportSection">
-                <div className="sectionTitle sectionTitleGray">
-                  <h2>Report.md (preview)</h2>
-                  <div className="hint">Loaded, not parsed.</div>
-                </div>
-                <div className="tableWrap tableWrapInset">
-                  <div className="small reportPreview">
-                    {reportText.slice(0, 1200)}
-                    {reportText.length > 1200 ? '\n\n…' : ''}
-                  </div>
-                </div>
+              <div className="subPanel">
+                <h3>Report preview</h3>
+                <pre>{reportText.slice(0, 1200)}{reportText.length > 1200 ? '\n\n…' : ''}</pre>
               </div>
             ) : null}
 
             {signalsCount ? (
-              <div className="auxSection signalsSection">
-                <div className="sectionTitle sectionTitleYellow">
-                  <h2>Signals</h2>
-                  <div className="hint">{signalsCount} loaded</div>
-                </div>
-                <div className="small">
-                  Signals are currently not joined to cards; used only for optional context.
-                </div>
+              <div className="subPanel">
+                <h3>Signals</h3>
+                <p>{signalsCount} loaded. Signals are currently not joined directly to each card.</p>
               </div>
             ) : null}
-          </div>
-        </div>
+          </section>
+        </aside>
 
-        <div className="tableColumn">
-          <div className="card tableCard">
-            <div className="sectionTitle sectionTitleYellow">
-              <h2>Opportunity Cards</h2>
-              <div className="hint">Click a row to open details.</div>
-            </div>
-
-            <div className="tableWrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th className="thScore">Total</th>
-                    <th>Solution</th>
-                    <th className="thTarget">Target user</th>
-                    <th className="thSource">Source</th>
-                    <th>Source title</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((o) => (
-                    <tr key={o.source_fingerprint || o.source_url} onClick={() => setSelected(o)}>
-                      <td className="score">{totalScore(o)}</td>
-                      <td>{o.solution}</td>
-                      <td>{o.target_user}</td>
-                      <td>
-                        <span className="badge">{o.source}</span>
-                      </td>
-                      <td>
-                        <a
-                          href={o.source_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {o.source_title}
-                        </a>
-                        <span className="small sourceHost">({linkLabel(o.source_url)})</span>
-                      </td>
-                    </tr>
-                  ))}
-                  {!filtered.length ? (
-                    <tr>
-                      <td colSpan={5} className="small emptyState">
-                        {mode === 'api'
-                          ? 'No results yet. Run Collect/Analyze from the Run panel.'
-                          : 'No results. Load opportunities.jsonl or relax filters.'}
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {selected ? (
-        <div
-          className="modalOverlay"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setSelected(null)}
-        >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modalHeader">
+        <main className="feedColumn">
+          <section className="cardSurface feedPanel">
+            <div className="cardHeading cardHeadingRow">
               <div>
-                <h3>{selected.solution}</h3>
-                <div className="small modalMeta">
-                  <span className="badge">{selected.source}</span> • score{' '}
-                  <b>{totalScore(selected)}</b> •{' '}
-                  <a href={selected.source_url} target="_blank" rel="noreferrer">
-                    {selected.source_title}
-                  </a>
-                </div>
+                <h2>Opportunity Card Feed</h2>
+                <p>Wheel/trackpad snaps one card per scroll. Arrow keys, Home, End also work.</p>
               </div>
-              <button className="btn btnRed" onClick={() => setSelected(null)}>
-                Close
-              </button>
+              <span className="statusBadge">
+                {filtered.length ? `${activeIndex + 1} / ${filtered.length}` : '0 / 0'}
+              </span>
             </div>
 
-            <div className="kv">
-              <div className="k">zh_summary</div>
-              <div className="v">{selected.zh_summary || '—'}</div>
-              <div className="k">zh_analysis</div>
-              <div className="v">{selected.zh_analysis || '—'}</div>
-            </div>
+            <div
+              ref={feedRef}
+              className="feedViewport"
+              tabIndex={0}
+              onKeyDown={onFeedKeyDown}
+              aria-label="Opportunity cards feed"
+            >
+              {filtered.length ? (
+                filtered.map((opportunity, index) => {
+                  const score = totalScore(opportunity)
 
-            <div className="kv">
-              <div className="k">target_user</div>
-              <div className="v">{selected.target_user}</div>
-              <div className="k">trigger</div>
-              <div className="v">{selected.trigger}</div>
-            </div>
+                  return (
+                    <article
+                      key={cardKey(opportunity, index)}
+                      className={`feedCard ${index === activeIndex ? 'isActive' : ''}`}
+                      data-feed-card="true"
+                    >
+                      <div className="feedCardTop">
+                        <div>
+                          <h3>{opportunity.solution}</h3>
+                          <p>{opportunity.zh_summary || '暂无摘要'}</p>
+                        </div>
+                        <div className="scoreStack" aria-label={`total score ${score}`}>
+                          <span>Total score</span>
+                          <strong>{score}</strong>
+                          <small>/ 30</small>
+                        </div>
+                      </div>
 
-            <div className="kv">
-              <div className="k">pain</div>
-              <div className="v">{selected.pain}</div>
-              <div className="k">existing_alternatives</div>
-              <div className="v">{selected.existing_alternatives}</div>
-            </div>
+                      <div className="sourceLine">
+                        <span className="sourceBadge">{opportunity.source}</span>
+                        <a href={opportunity.source_url} target="_blank" rel="noreferrer">
+                          {opportunity.source_title}
+                        </a>
+                        <span className="sourceHost">({linkLabel(opportunity.source_url)})</span>
+                      </div>
 
-            <div className="kv">
-              <div className="k">pricing_reason</div>
-              <div className="v">{selected.pricing_reason}</div>
-              <div className="k">validation_7d</div>
-              <div className="v">{selected.validation_7d}</div>
-              <div className="k">success_signal</div>
-              <div className="v">{selected.success_signal}</div>
-            </div>
+                      <div className="vizGrid">
+                        <div className="vizCard">
+                          <h4>Scoring</h4>
+                          <div className="donutRow">
+                            <ScoreDonut scoring={opportunity.scoring} />
+                            <div className="dimensionList" role="list">
+                              {SCORE_DIMENSIONS.map((dimension) => {
+                                const value = clamp(Number(opportunity.scoring?.[dimension.key] ?? 0), 0, 5)
+                                return (
+                                  <div key={dimension.key} className="dimensionItem" role="listitem">
+                                    <span>{dimension.label}</span>
+                                    <div className="dimensionTrack">
+                                      <span
+                                        style={{
+                                          width: `${(value / 5) * 100}%`,
+                                          backgroundColor: dimension.color,
+                                        }}
+                                      />
+                                    </div>
+                                    <b>{value}/5</b>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        </div>
 
-            <div className="footer">
-              {mode === 'api'
-                ? 'API mode: opportunities and report are loaded from the local trendbot server.'
-                : 'Browser local-file mode: choose files again if your OS blocks re-reading; Reload usually works.'}
+                        <div className="vizCard">
+                          <h4>Validation signals</h4>
+                          <SignalMeter label="validation_7d" value={opportunity.validation_7d} />
+                          <SignalMeter label="success_signal" value={opportunity.success_signal} />
+                        </div>
+                      </div>
+
+                      <details className="detailsPanel">
+                        <summary>Expand full details</summary>
+                        <div className="detailsGrid">
+                          <div>
+                            <h5>target_user</h5>
+                            <p>{opportunity.target_user || '—'}</p>
+                          </div>
+                          <div>
+                            <h5>trigger</h5>
+                            <p>{opportunity.trigger || '—'}</p>
+                          </div>
+                          <div>
+                            <h5>pain</h5>
+                            <p>{opportunity.pain || '—'}</p>
+                          </div>
+                          <div>
+                            <h5>alternatives</h5>
+                            <p>{opportunity.existing_alternatives || '—'}</p>
+                          </div>
+                          <div>
+                            <h5>pricing_reason</h5>
+                            <p>{opportunity.pricing_reason || '—'}</p>
+                          </div>
+                          <div>
+                            <h5>zh_analysis</h5>
+                            <p>{opportunity.zh_analysis || '—'}</p>
+                          </div>
+                        </div>
+                      </details>
+                    </article>
+                  )
+                })
+              ) : (
+                <div className="emptyFeed" data-feed-card="true">
+                  {mode === 'api'
+                    ? 'No results yet. Run Collect/Analyze from the left panel.'
+                    : 'No results. Load opportunities.jsonl or relax filters.'}
+                </div>
+              )}
             </div>
-          </div>
-        </div>
-      ) : null}
+          </section>
+        </main>
+      </div>
     </div>
   )
 }

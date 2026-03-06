@@ -1,12 +1,20 @@
 :root {
-  font-family: 'Montserrat', 'Avenir Next', 'Century Gothic', Futura, 'Trebuchet MS', 'Segoe UI', sans-serif;
-  line-height: 1.4;
-  font-weight: 500;
+  font-family:
+    'PingFang SC',
+    'SF Pro Text',
+    'SF Pro Display',
+    'Helvetica Neue',
+    'Segoe UI',
+    'Noto Sans CJK SC',
+    'Microsoft YaHei',
+    sans-serif;
+  line-height: 1.45;
+  font-weight: 400;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
 }
