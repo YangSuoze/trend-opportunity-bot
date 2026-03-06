@@ -71,20 +71,43 @@ trendbot analyze --in artifacts/signals.jsonl --out artifacts/opportunities.json
 trendbot report --in artifacts/opportunities.jsonl --out artifacts/report.md
 ```
 
-## Web 前端（本地查看 JSONL）
-Web 前端目录在 `web/`，纯本地文件模式，无后端。
+### 4) 启动本地 API 服务（无鉴权，仅绑定 `127.0.0.1`）
+
+```bash
+trendbot serve --port 8000
+```
+
+主要接口：
+- `POST /api/collect` body: `{ "window": "24h", "limit": 30 }`
+- `POST /api/analyze` body: `{ "top": 30, "resume": true }`
+- `POST /api/report` body: `{}`
+- `GET /api/status`
+- `GET /api/artifacts/signals`
+- `GET /api/artifacts/opportunities`
+- `GET /api/artifacts/report`
+- `GET /api/jobs/{jobId}`
+- `GET /api/jobs/{jobId}/events`（SSE）
+
+## Web 前端
+Web 前端目录在 `web/`，支持两种模式：
+- **API mode（默认）**：连接本地 `trendbot serve`
+- **Local file mode**：保留原有文件选择器流程
 
 ### 本地运行
 
 ```bash
+# 终端 1
+trendbot serve --port 8000
+
+# 终端 2
 cd web
 pnpm install
 pnpm dev
 ```
 
 然后在浏览器里：
-- 选择加载 `opportunities.jsonl`（必选）
-- 可选加载 `signals.jsonl` / `report.md`
+- 默认直接使用 API mode，可在页面 Run 面板中执行 Collect / Analyze / Report
+- 也可以切换到 Local file mode，手动选择 `opportunities.jsonl` / `signals.jsonl` / `report.md`
 
 ### 部署（静态站点）
 
@@ -108,4 +131,6 @@ pnpm dev
    ```
 2. 将 `web/dist` 发布为 Pages（你可以用 gh-pages 分支或 GitHub Actions）
 
-> 注意：前端通过文件选择器读取本地 JSONL，浏览器无法实时 tail 文件；如果 `trendbot analyze` 正在持续写入，点击页面的 **Reload** 重新读取即可。
+> 注意：
+> - API mode 下每个作业完成后会自动刷新 opportunities/report 视图。
+> - Local file mode 下浏览器仍无法实时 tail 文件；如果 `trendbot analyze` 正在写入，点击 **Reload** 重新读取即可。

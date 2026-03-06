@@ -120,6 +120,7 @@ def analyze_file(
     resume: bool = True,
     on_progress: ProgressCallback | None = None,
     on_error: ErrorCallback | None = None,
+    on_card: CardCallback | None = None,
 ) -> list[OpportunityCard]:
     rows = read_jsonl(input_path)
     signals = [Signal.model_validate(row) for row in rows]
@@ -137,9 +138,19 @@ def analyze_file(
         seen_fingerprints=seen_fingerprints,
         on_progress=on_progress,
         on_error=on_error,
-        on_card=lambda card: append_jsonl(output_path, [card]),
+        on_card=lambda card: _persist_card(output_path, card, on_card),
     )
     return cards
+
+
+def _persist_card(
+    output_path: Path,
+    card: OpportunityCard,
+    on_card: CardCallback | None,
+) -> None:
+    append_jsonl(output_path, [card])
+    if on_card:
+        on_card(card)
 
 
 def _load_source_fingerprints(path: Path) -> set[str]:

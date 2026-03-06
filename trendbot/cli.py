@@ -7,26 +7,11 @@ import typer
 from rich.console import Console
 
 from trendbot.analyzer import AnalyzeError, analyze_file
-from trendbot.collectors import (
-    DEFAULT_GITHUB_QUERIES,
-    DevToCollector,
-    GitHubCollector,
-    HackerNewsCollector,
-    ProductHuntCollector,
-    RedditCollector,
-    SubstackCollector,
-)
-from trendbot.collectors.devto import CollectorError as DevToCollectorError
-from trendbot.collectors.github import CollectorError as GitHubCollectorError
-from trendbot.collectors.hackernews import CollectorError as HackerNewsCollectorError
-from trendbot.collectors.producthunt import CollectorError as ProductHuntCollectorError
-from trendbot.collectors.reddit import CollectorError as RedditCollectorError
-from trendbot.collectors.substack import CollectorError as SubstackCollectorError
 from trendbot.config import Settings
-from trendbot.models import Signal
 from trendbot.openai_client import OpenAIClient, OpenAIClientError
+from trendbot.pipeline import collect_signals
 from trendbot.reporting import report_from_file
-from trendbot.utils import deduplicate_signals, parse_window, write_jsonl
+from trendbot.utils import write_jsonl
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
@@ -78,114 +63,41 @@ def collect(
     """Collect trend signals from available sources and optional API/RSS collectors."""
 
     settings = Settings.load()
+    source_labels = {
+        "github": "GitHub",
+        "hackernews": "Hacker News",
+        "producthunt": "Product Hunt",
+        "reddit": "Reddit",
+        "devto": "DEV.to",
+        "substack": "Substack",
+    }
+
+    def on_source_result(source: str, count: int, error: str | None) -> None:
+        label = source_labels.get(source, source)
+        if error:
+            if "skipping" in error.lower() or "disabled" in error.lower():
+                console.print(f"[yellow]{error}[/yellow]")
+                return
+            console.print(f"[yellow]{label} collector failed:[/yellow] {error}")
+            return
+        console.print(f"[green]{label}:[/green] collected {count} signals")
+
     try:
-        window_delta = parse_window(window)
+        unique_signals = collect_signals(
+            settings=settings,
+            window=window,
+            limit=limit,
+            github_query=github_query,
+            github_language=github_language,
+            hn_mode=hn_mode,
+            reddit_subreddit=reddit_subreddit,
+            devto_tag=devto_tag,
+            substack_feed=substack_feed,
+            on_source_result=on_source_result,
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--window") from exc
 
-    all_signals: list[Signal] = []
-    queries = github_query if github_query else DEFAULT_GITHUB_QUERIES
-
-    if settings.github_token:
-        github_collector = GitHubCollector(token=settings.github_token)
-        try:
-            gh_signals = github_collector.collect(
-                queries=queries,
-                language=github_language,
-                sort="stars",
-                limit=limit,
-                window=window_delta,
-            )
-            all_signals.extend(gh_signals)
-            console.print(f"[green]GitHub:[/green] collected {len(gh_signals)} signals")
-        except GitHubCollectorError as exc:
-            console.print(f"[yellow]GitHub collector failed:[/yellow] {exc}")
-    else:
-        console.print("[yellow]GITHUB_TOKEN not set; skipping GitHub collector.[/yellow]")
-
-    hn_collector = HackerNewsCollector()
-    try:
-        hn_signals = hn_collector.collect(mode=hn_mode, limit=limit, window=window_delta)
-        all_signals.extend(hn_signals)
-        console.print(f"[green]Hacker News:[/green] collected {len(hn_signals)} signals")
-    except HackerNewsCollectorError as exc:
-        console.print(f"[yellow]Hacker News collector failed:[/yellow] {exc}")
-
-    if settings.producthunt_token:
-        ph_collector = ProductHuntCollector(token=settings.producthunt_token)
-        try:
-            ph_signals = ph_collector.collect(limit=limit, window=window_delta)
-            all_signals.extend(ph_signals)
-            console.print(f"[green]Product Hunt:[/green] collected {len(ph_signals)} signals")
-        except ProductHuntCollectorError as exc:
-            console.print(f"[yellow]Product Hunt collector failed:[/yellow] {exc}")
-    else:
-        console.print(
-            "[yellow]PRODUCTHUNT_TOKEN not set; skipping Product Hunt collector.[/yellow]"
-        )
-
-    selected_reddit_subreddits = (
-        reddit_subreddit if reddit_subreddit else settings.reddit_subreddits
-    )
-    if (
-        settings.reddit_client_id
-        and settings.reddit_client_secret
-        and selected_reddit_subreddits
-    ):
-        reddit_collector = RedditCollector(
-            client_id=settings.reddit_client_id,
-            client_secret=settings.reddit_client_secret,
-            user_agent=settings.reddit_user_agent,
-        )
-        try:
-            reddit_signals = reddit_collector.collect(
-                subreddits=selected_reddit_subreddits,
-                limit=limit,
-                window=window_delta,
-            )
-            all_signals.extend(reddit_signals)
-            console.print(f"[green]Reddit:[/green] collected {len(reddit_signals)} signals")
-        except RedditCollectorError as exc:
-            console.print(f"[yellow]Reddit collector failed:[/yellow] {exc}")
-    else:
-        console.print(
-            "[yellow]Reddit disabled; set REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, "
-            "and REDDIT_SUBREDDITS (or --reddit-subreddit).[/yellow]"
-        )
-
-    selected_devto_tags = devto_tag if devto_tag else settings.devto_tags
-    if selected_devto_tags:
-        devto_collector = DevToCollector()
-        try:
-            devto_signals = devto_collector.collect(
-                tags=selected_devto_tags,
-                limit=limit,
-                window=window_delta,
-            )
-            all_signals.extend(devto_signals)
-            console.print(f"[green]DEV.to:[/green] collected {len(devto_signals)} signals")
-        except DevToCollectorError as exc:
-            console.print(f"[yellow]DEV.to collector failed:[/yellow] {exc}")
-    else:
-        console.print("[yellow]DEVTO_TAGS not set; skipping DEV.to collector.[/yellow]")
-
-    selected_substack_feeds = substack_feed if substack_feed else settings.substack_feeds
-    if selected_substack_feeds:
-        substack_collector = SubstackCollector()
-        try:
-            substack_signals = substack_collector.collect(
-                feed_urls=selected_substack_feeds,
-                limit=limit,
-                window=window_delta,
-            )
-            all_signals.extend(substack_signals)
-            console.print(f"[green]Substack:[/green] collected {len(substack_signals)} signals")
-        except SubstackCollectorError as exc:
-            console.print(f"[yellow]Substack collector failed:[/yellow] {exc}")
-    else:
-        console.print("[yellow]SUBSTACK_FEEDS not set; skipping Substack collector.[/yellow]")
-
-    unique_signals = deduplicate_signals(all_signals)
     write_jsonl(out, unique_signals)
 
     console.print(f"[bold]Saved {len(unique_signals)} deduplicated signals to {out}[/bold]")
@@ -275,6 +187,37 @@ def report(
 
     markdown = report_from_file(in_path, out)
     console.print(f"[bold]Saved report ({len(markdown)} bytes) to {out}[/bold]")
+
+
+@app.command()
+def serve(
+    port: Annotated[
+        int,
+        typer.Option("--port", min=1, max=65535, help="Local bind port"),
+    ] = 8000,
+    reload: Annotated[
+        bool,
+        typer.Option(
+            "--reload/--no-reload",
+            help="Enable auto-reload (development only)",
+        ),
+    ] = False,
+) -> None:
+    """Run the local API server bound to 127.0.0.1."""
+
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise typer.Exit(
+            code=_exit_with_error(
+                "uvicorn is not installed. Install dependencies with `pip install -e .`."
+            )
+        ) from exc
+
+    from trendbot.server import create_app
+
+    console.print(f"[bold]Serving API at http://127.0.0.1:{port}[/bold]")
+    uvicorn.run(create_app(), host="127.0.0.1", port=port, reload=reload)
 
 
 def _exit_with_error(message: str) -> int:

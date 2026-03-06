@@ -114,6 +114,23 @@ Report:
 trendbot report --in artifacts/opportunities.jsonl --out artifacts/report.md
 ```
 
+Serve local API (no auth, binds `127.0.0.1` only):
+
+```bash
+trendbot serve --port 8000
+```
+
+API endpoints:
+- `POST /api/collect` body: `{ "window": "24h", "limit": 30 }`
+- `POST /api/analyze` body: `{ "top": 30, "resume": true }`
+- `POST /api/report` body: `{}`
+- `GET /api/status`
+- `GET /api/artifacts/signals`
+- `GET /api/artifacts/opportunities`
+- `GET /api/artifacts/report`
+- `GET /api/jobs/{jobId}`
+- `GET /api/jobs/{jobId}/events` (SSE)
+
 ## Data Schemas
 `Signal` fields:
 - `source`
@@ -144,11 +161,17 @@ Opportunity card fields:
 
 ## Web UI (React + TypeScript)
 
-A local-only UI lives in `web/` for viewing `opportunities.jsonl`.
+`web/` now supports:
+- **API mode (default)**: talks to local `trendbot serve` backend.
+- **Local file mode**: keeps existing file picker flow.
 
-Run locally:
+Run locally (two terminals):
 
 ```bash
+# terminal 1
+trendbot serve --port 8000
+
+# terminal 2
 cd web
 pnpm install
 pnpm dev
@@ -169,4 +192,6 @@ The web app is a static Vite build output in `web/dist`. Recommended options:
 - **Netlify**: Base `web`, Build `pnpm install && pnpm build`, Publish `web/dist`.
 - **GitHub Pages**: build `web/dist` and publish via Pages (branch or Actions).
 
-Note: browsers cannot tail local files; use Reload to re-read the chosen JSONL file.
+Notes:
+- API mode auto-refreshes opportunities/report after each completed job.
+- Local file mode still cannot tail files; use Reload to re-read the chosen files.

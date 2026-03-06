@@ -1,10 +1,14 @@
 # Trend Opportunity Viewer (web)
 
-A local-only React + TypeScript UI to view `trend-opportunity-bot` outputs.
+A local React + TypeScript UI to view and run `trend-opportunity-bot` workflows.
 
 ## Run
 
 ```bash
+# terminal 1 (from repo root)
+trendbot serve --port 8000
+
+# terminal 2
 cd web
 pnpm install
 pnpm dev
@@ -13,12 +17,13 @@ pnpm dev
 Then open the dev URL (usually http://localhost:5173).
 
 ## Use
-- Load `opportunities.jsonl` (required)
-- Optionally load `signals.jsonl` and `report.md`
+- API mode is default: run `Collect`, `Analyze`, `Report` from the Run panel
+- Local file mode keeps the existing file picker flow
 - Use filters (source/min score/keyword) and click a row for details
 
 ## Notes
-Browsers cannot tail local files. If `trendbot analyze` is still running and appending to the JSONL, click **Reload** to re-read the selected file.
+- API mode auto-refreshes opportunities/report after each finished job.
+- Local file mode still cannot tail files; click **Reload** to re-read selected files.
 
 ## Bauhaus UI redesign decisions
 - Primary palette is strict Bauhaus: `#E94B3C` (red), `#F2C94C` (yellow), `#2F80ED` (blue), plus black/white/gray neutrals.

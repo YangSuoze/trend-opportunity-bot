@@ -239,6 +239,10 @@ a {
   background: var(--yellow);
 }
 
+.btnGhost {
+  background: var(--panel);
+}
+
 .mainLayout {
   display: grid;
   grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
@@ -332,6 +336,16 @@ a {
   align-items: stretch;
 }
 
+.modeToggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.modeCard .apiMeta {
+  margin-top: 10px;
+}
+
 .field {
   position: relative;
   display: flex;
@@ -400,6 +414,12 @@ input[type='range'] {
   accent-color: var(--blue);
 }
 
+input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--blue);
+}
+
 option {
   color: var(--black);
 }
@@ -430,6 +450,68 @@ option {
 .parseWarn {
   margin-top: 10px;
   line-height: 1.4;
+}
+
+.apiWarn {
+  margin-top: 10px;
+}
+
+.runInputs {
+  gap: 10px;
+}
+
+.checkboxField {
+  min-height: 88px;
+}
+
+.checkboxRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.runButtons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.eventLog {
+  margin-top: 12px;
+  border: 4px solid var(--line);
+  background: var(--paper);
+  max-height: 190px;
+  overflow: auto;
+}
+
+.eventLine {
+  padding: 8px 10px;
+  border-bottom: 2px solid var(--line);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel);
+}
+
+.eventLine:last-child {
+  border-bottom: none;
+}
+
+.eventLine[data-type='progress'] {
+  background: rgba(47, 128, 237, 0.14);
+}
+
+.eventLine[data-type='card'] {
+  background: rgba(242, 201, 76, 0.2);
+}
+
+.eventLine[data-type='done'] {
+  background: rgba(58, 167, 109, 0.18);
+}
+
+.eventLine[data-type='error'] {
+  background: rgba(233, 75, 60, 0.22);
 }
 
 .footer {
@@ -690,5 +772,10 @@ a:focus-visible {
   .kv {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .modeToggle,
+  .runButtons {
+    grid-template-columns: 1fr;
   }
 }
