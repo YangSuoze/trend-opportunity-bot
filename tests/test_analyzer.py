@@ -25,6 +25,10 @@ def test_analyze_signals_parses_json_response() -> None:
                             "pricing_reason": "Saves days of research",
                             "validation_7d": "Interview 10 users and ship landing page",
                             "success_signal": "3 paid pilots",
+                            "zh_summary": "面向独立开发者的趋势机会分析工具。",
+                            "zh_analysis": (
+                                "现在需求增长，风险在于同质化，差异化在于自动化验证流程。"
+                            ),
                             "scoring": {
                                 "demand": 4,
                                 "urgency": 4,
@@ -41,7 +45,14 @@ def test_analyze_signals_parses_json_response() -> None:
         ]
     }
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        system_prompt = body["messages"][0]["content"]
+        user_prompt = body["messages"][1]["content"]
+        assert "zh_summary" in system_prompt
+        assert "zh_analysis" in system_prompt
+        assert "zh_summary" in user_prompt
+        assert "zh_analysis" in user_prompt
         return httpx.Response(200, json=response_payload)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -67,4 +78,6 @@ def test_analyze_signals_parses_json_response() -> None:
 
     assert len(cards) == 1
     assert cards[0].solution == "RAG trend-to-opportunity CLI"
+    assert cards[0].zh_summary == "面向独立开发者的趋势机会分析工具。"
+    assert cards[0].zh_analysis == "现在需求增长，风险在于同质化，差异化在于自动化验证流程。"
     assert cards[0].scoring.total == 23

@@ -78,5 +78,7 @@ class OpportunityCard(BaseModel):
     pricing_reason: str
     validation_7d: str
     success_signal: str
+    zh_summary: str = ""
+    zh_analysis: str = ""
     scoring: OpportunityScoring
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

@@ -12,6 +12,7 @@ from trendbot.utils import deduplicate_signals, read_jsonl, write_jsonl
 _SYSTEM_PROMPT = """
 You are a product strategist. Return ONLY valid JSON.
 Given one trend signal, produce one concise opportunity card.
+Use Chinese (zh-CN) for zh_summary and zh_analysis.
 Scoring dimensions must be integers 0..5 for:
 - demand
 - urgency
@@ -20,6 +21,18 @@ Scoring dimensions must be integers 0..5 for:
 - monetization
 - defensibility
 And include total as the sum.
+Required JSON keys:
+- target_user
+- trigger
+- pain
+- existing_alternatives
+- solution
+- pricing_reason
+- validation_7d
+- success_signal
+- zh_summary
+- zh_analysis
+- scoring
 """.strip()
 
 
@@ -60,6 +73,8 @@ def analyze_signals(
                 pricing_reason=str(payload.get("pricing_reason", "")).strip(),
                 validation_7d=str(payload.get("validation_7d", "")).strip(),
                 success_signal=str(payload.get("success_signal", "")).strip(),
+                zh_summary=str(payload.get("zh_summary", "")).strip(),
+                zh_analysis=str(payload.get("zh_analysis", "")).strip(),
                 scoring=payload.get("scoring", {}),
             )
             cards.append(card)
@@ -116,8 +131,10 @@ def _build_user_prompt(signal: Signal) -> str:
     return (
         "Create one opportunity card from this signal.\n"
         "Keep each field concrete and concise.\n"
+        "Return zh_summary and zh_analysis in Chinese (zh-CN).\n"
         "Return JSON with keys: target_user, trigger, pain, existing_alternatives, "
-        "solution, pricing_reason, validation_7d, success_signal, scoring.\n"
+        "solution, pricing_reason, validation_7d, success_signal, zh_summary, "
+        "zh_analysis, scoring.\n"
         "Signal:\n"
         f"source: {signal.source}\n"
         f"title: {signal.title}\n"

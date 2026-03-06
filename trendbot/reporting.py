@@ -44,6 +44,12 @@ def render_report(cards: list[OpportunityCard]) -> str:
                 f"- Pricing Reason: {card.pricing_reason}",
                 f"- Validation (7d): {card.validation_7d}",
                 f"- Success Signal: {card.success_signal}",
+                "",
+                "#### zh_summary",
+                card.zh_summary,
+                "",
+                "#### zh_analysis",
+                card.zh_analysis,
                 (
                     "- Scoring: "
                     f"demand={card.scoring.demand}, "
