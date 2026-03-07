@@ -28,6 +28,8 @@ const AUTO_COLLECT_WINDOW = '24h'
 const AUTO_COLLECT_LIMIT = 120
 const AUTO_ANALYZE_TOP = 30
 const JOB_POLL_MS = 450
+const AUTO_RUN_GUARD_PREFIX = 'trendbot-autogen-'
+const AUTO_STATUS_PREFIX = 'Auto-generating local-today opportunities'
 const AUTO_TOKEN_WARNING_HINT =
   'Likely cause: missing collector/API tokens in .env (GITHUB_TOKEN is recommended).'
 
@@ -160,6 +162,34 @@ function dayKeyWithOffset(dayKey: string, offsetDays: number) {
   const date = dayKeyToDate(dayKey)
   date.setDate(date.getDate() + offsetDays)
   return toLocalDayKey(date)
+}
+
+function autoRunGuardKey(dayKey: string) {
+  return `${AUTO_RUN_GUARD_PREFIX}${dayKey}`
+}
+
+function hasStorageKey(key: string) {
+  try {
+    return window.localStorage.getItem(key) !== null
+  } catch {
+    return false
+  }
+}
+
+function setStorageKey(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // no-op when storage is unavailable
+  }
+}
+
+function removeStorageKey(key: string) {
+  try {
+    window.localStorage.removeItem(key)
+  } catch {
+    // no-op when storage is unavailable
+  }
 }
 
 function isSameLocalDay(date: Date, dayKey: string) {
@@ -484,6 +514,9 @@ export default function App() {
   const [autoPipelineStatusText, setAutoPipelineStatusText] = useState('')
   const [autoPipelineWarning, setAutoPipelineWarning] = useState('')
   const [hasFetchedArtifactsOnce, setHasFetchedArtifactsOnce] = useState(false)
+  const [isTodayAutoRunGuarded, setIsTodayAutoRunGuarded] = useState(() =>
+    hasStorageKey(autoRunGuardKey(toLocalDayKey(new Date()))),
+  )
 
   const feedRef = useRef<HTMLDivElement | null>(null)
   const activeIndexRef = useRef(0)
@@ -494,6 +527,7 @@ export default function App() {
   const suppressFeedClickUntilRef = useRef(0)
   const autoRunAttemptedRef = useRef(false)
   const autoPipelineRunningRef = useRef(false)
+  const todayAutoRunGuardKey = useMemo(() => autoRunGuardKey(todayKey), [todayKey])
 
   const refreshApiArtifacts = useCallback(async (): Promise<ArtifactSnapshot | null> => {
     setIsApiLoading(true)
@@ -533,10 +567,13 @@ export default function App() {
 
   const onRefreshClick = useCallback(() => {
     autoRunAttemptedRef.current = false
+    removeStorageKey(todayAutoRunGuardKey)
+    removeStorageKey(autoRunGuardKey(toLocalDayKey(new Date())))
+    setIsTodayAutoRunGuarded(false)
     setAutoPipelineWarning('')
     setAutoPipelineStatusText('')
     void refreshApiArtifacts()
-  }, [refreshApiArtifacts])
+  }, [refreshApiArtifacts, todayAutoRunGuardKey])
 
   const waitForJobTerminal = useCallback(
     async (jobId: string, stageLabel: string) => {
@@ -597,7 +634,7 @@ export default function App() {
           const sourceValue = typeof payload.source === 'string' ? ` [${payload.source}]` : ''
           const titleValue = typeof payload.title === 'string' ? ` ${payload.title}` : ''
 
-          setAutoPipelineStatusText(`Auto-generating... analyzing${progressValue}${sourceValue}${titleValue}`)
+          setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: analyzing${progressValue}${sourceValue}${titleValue}`)
         })
 
         source.addEventListener('card', (event) => {
@@ -612,7 +649,7 @@ export default function App() {
 
           setApiOpportunities((prev) => upsertOpportunity(prev, incomingCard))
           setLastUpdatedAt(new Date())
-          setAutoPipelineStatusText(`Auto-generating... analyzing (cards: ${streamedCardCount})`)
+          setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: analyzing (cards: ${streamedCardCount})`)
         })
 
         source.addEventListener('done', (event) => {
@@ -636,7 +673,7 @@ export default function App() {
           if (event instanceof MessageEvent) {
             const payload = parseJsonRecord(event.data)
             const message = typeof payload?.message === 'string' ? payload.message : 'Analyze warning'
-            setAutoPipelineStatusText(`Auto-generating... ${message}`)
+            setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: ${message}`)
             return
           }
 
@@ -652,7 +689,7 @@ export default function App() {
                 return
               }
 
-              setAutoPipelineStatusText('Auto-generating... reconnecting analyze stream...')
+              setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: reconnecting analyze stream...`)
             })
             .catch((error) => {
               const message = error instanceof Error ? error.message : String(error)
@@ -671,25 +708,26 @@ export default function App() {
     setAutoPipelineWarning('')
 
     try {
-      setAutoPipelineStatusText('Auto-generating... collecting signals')
+      setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: collecting signals`)
       const collectJob = await postJson<JobStartPayload>(`${apiBase}/api/collect`, {
         window: AUTO_COLLECT_WINDOW,
         limit: AUTO_COLLECT_LIMIT,
       })
       await waitForJobTerminal(collectJob.jobId, 'Collect')
 
-      setAutoPipelineStatusText('Auto-generating... analyzing opportunities')
+      setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: analyzing opportunities`)
       const analyzeJob = await postJson<JobStartPayload>(`${apiBase}/api/analyze`, {
         top: AUTO_ANALYZE_TOP,
         resume: true,
       })
       const analyzeResult = await streamAnalyzeJobEvents(analyzeJob.jobId)
 
-      setAutoPipelineStatusText('Auto-generating... generating report')
+      setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: generating report`)
       const reportJob = await postJson<JobStartPayload>(`${apiBase}/api/report`, {})
       await waitForJobTerminal(reportJob.jobId, 'Report')
 
       const refreshed = await refreshApiArtifacts()
+      setDayPreference('today')
       const reconciledCount = refreshed?.opportunities.length ?? 0
       const doneCount = Number(analyzeResult.counts.total_cards ?? 0)
       if (reconciledCount <= 0 && doneCount <= 0 && analyzeResult.streamedCardCount <= 0) {
@@ -702,6 +740,7 @@ export default function App() {
       autoPipelineRunningRef.current = false
       setIsAutoGenerating(false)
       setAutoPipelineStatusText('')
+      setDayPreference('today')
     }
   }, [apiBase, refreshApiArtifacts, streamAnalyzeJobEvents, waitForJobTerminal])
 
@@ -765,6 +804,11 @@ export default function App() {
       window.clearTimeout(timeoutId)
     }
   }, [])
+
+  useEffect(() => {
+    autoRunAttemptedRef.current = false
+    setIsTodayAutoRunGuarded(hasStorageKey(todayAutoRunGuardKey))
+  }, [todayAutoRunGuardKey])
 
   const signalTimestampLookup = useMemo(() => {
     const byFingerprint = new Map<string, Date>()
@@ -885,22 +929,28 @@ export default function App() {
   const hasAnyOpportunities = apiOpportunities.length > 0
   const isUsingFallbackDay = hasAnyOpportunities && visibleDayKey !== preferredDayKey
   const lastUpdatedLabel = lastUpdatedAt ? dateTimeFormatter.format(lastUpdatedAt) : 'Not yet synced'
-  const shouldAutoRunWhenEmpty =
-    !hasTodayOpportunities && (apiOpportunities.length === 0 || visibleOpportunities.length === 0)
+  const shouldShowAutoRunGuardNote =
+    hasFetchedArtifactsOnce && !isApiLoading && !isAutoGenerating && !hasTodayOpportunities && isTodayAutoRunGuarded
 
   useEffect(() => {
     if (!hasFetchedArtifactsOnce || isApiLoading || isAutoGenerating) return
-    if (!shouldAutoRunWhenEmpty) return
+    if (hasTodayOpportunities) return
+    if (isTodayAutoRunGuarded) return
     if (autoRunAttemptedRef.current || autoPipelineRunningRef.current) return
 
     autoRunAttemptedRef.current = true
+    setStorageKey(todayAutoRunGuardKey, new Date().toISOString())
+    setIsTodayAutoRunGuarded(true)
+    setAutoPipelineStatusText(`${AUTO_STATUS_PREFIX}: starting pipeline`)
     void runAutoPipeline()
   }, [
     hasFetchedArtifactsOnce,
+    hasTodayOpportunities,
     isApiLoading,
     isAutoGenerating,
+    isTodayAutoRunGuarded,
     runAutoPipeline,
-    shouldAutoRunWhenEmpty,
+    todayAutoRunGuardKey,
   ])
 
   const getFeedCards = useCallback(() => {
@@ -1319,8 +1369,11 @@ export default function App() {
               ) : null}
               {isAutoGenerating ? (
                 <p className="autoStatus" role="status" aria-live="polite">
-                  {autoPipelineStatusText || 'Auto-generating...'}
+                  {autoPipelineStatusText || `${AUTO_STATUS_PREFIX}...`}
                 </p>
+              ) : null}
+              {shouldShowAutoRunGuardNote ? (
+                <p className="dayFallbackNote">No local-today opportunities yet. Auto-run already executed today.</p>
               ) : null}
             </div>
             <span className="statusBadge">
