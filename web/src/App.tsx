@@ -12,9 +12,18 @@ import './App.css'
 import type { OpportunityCard, OpportunityScoring, SignalRecord } from './types'
 
 const DEFAULT_API_BASE = import.meta.env.VITE_TRENDBOT_API_BASE ?? 'http://127.0.0.1:8000'
-const SNAP_LOCK_MS = 340
+const SNAP_LOCK_MS = 520
 const DRAG_START_THRESHOLD_PX = 6
 const DRAG_CLICK_SUPPRESS_MS = 140
+const DRAG_AXIS_LOCK_THRESHOLD_PX = 8
+const DRAG_DISTANCE_SNAP_RATIO = 0.24
+const DRAG_FLICK_VELOCITY_PX_PER_MS = 0.35
+const DRAG_MOMENTUM_MS = 180
+const DRAG_MAX_JUMP_CARDS = 2
+const WHEEL_DELTA_IGNORE_PX = 10
+const WHEEL_SNAP_DELTA_PX = 54
+const WHEEL_GESTURE_RESET_MS = 180
+const WHEEL_AXIS_INTENT_RATIO = 0.78
 
 type ScoreDimensionKey = Exclude<keyof OpportunityScoring, 'total'>
 type DayPreference = 'today' | 'yesterday'
@@ -31,8 +40,15 @@ interface ApiStatusPayload {
 interface FeedDragState {
   pointerId: number
   startX: number
+  startY: number
   startScrollLeft: number
+  startIndex: number
   moved: boolean
+  intent: 'undecided' | 'horizontal'
+  lastX: number
+  lastTime: number
+  velocityX: number
+  hasCapture: boolean
 }
 
 interface OpportunityWithTimestamp {
@@ -109,6 +125,86 @@ function isSameLocalDay(date: Date, dayKey: string) {
   return toLocalDayKey(date) === dayKey
 }
 
+function compareDayKeysDesc(a: string, b: string) {
+  const aTime = dayKeyToDate(a).getTime()
+  const bTime = dayKeyToDate(b).getTime()
+  if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
+    return b.localeCompare(a)
+  }
+  return bTime - aTime
+}
+
+function normalizeSourceUrl(raw?: string) {
+  if (!raw) return null
+
+  const value = raw.trim()
+  if (!value) return null
+
+  try {
+    const url = new URL(value)
+    url.hash = ''
+    url.hostname = url.hostname.replace(/^www\./i, '').toLowerCase()
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/'
+
+    const filteredEntries = Array.from(url.searchParams.entries())
+      .filter(
+        ([name]) =>
+          !/^utm_/i.test(name) &&
+          !/^ref$/i.test(name) &&
+          !/^source$/i.test(name) &&
+          !/^fbclid$/i.test(name) &&
+          !/^gclid$/i.test(name),
+      )
+      .sort((aEntry, bEntry) => {
+        if (aEntry[0] === bEntry[0]) return aEntry[1].localeCompare(bEntry[1])
+        return aEntry[0].localeCompare(bEntry[0])
+      })
+
+    const normalizedSearch = new URLSearchParams()
+    filteredEntries.forEach(([name, val]) => {
+      normalizedSearch.append(name, val)
+    })
+
+    const search = normalizedSearch.toString()
+    return `${url.hostname}${url.pathname}${search ? `?${search}` : ''}`
+  } catch {
+    return normalize(value)
+  }
+}
+
+function sourceUrlLookupKeys(raw?: string) {
+  if (!raw) return [] as string[]
+
+  const trimmed = raw.trim()
+  if (!trimmed) return []
+
+  const keys = new Set<string>()
+  keys.add(trimmed)
+  keys.add(normalize(trimmed))
+
+  const normalizedUrl = normalizeSourceUrl(trimmed)
+  if (normalizedUrl) {
+    keys.add(normalizedUrl)
+    const normalizedBase = normalizedUrl.split('?')[0]
+    if (normalizedBase) keys.add(normalizedBase)
+  }
+
+  return Array.from(keys)
+}
+
+function setLatestTimestamp(map: Map<string, Date>, key: string, timestamp: Date) {
+  const existing = map.get(key)
+  if (!existing || existing.getTime() < timestamp.getTime()) {
+    map.set(key, timestamp)
+  }
+}
+
+function normalizeWheelDelta(delta: number, deltaMode: number) {
+  if (deltaMode === WheelEvent.DOM_DELTA_LINE) return delta * 16
+  if (deltaMode === WheelEvent.DOM_DELTA_PAGE) return delta * 320
+  return delta
+}
+
 function polarToCartesian(cx: number, cy: number, radius: number, angle: number) {
   const radians = (angle * Math.PI) / 180
   return {
@@ -182,20 +278,26 @@ function resolveOpportunityTimestamp(
   byFingerprint: Map<string, Date>,
   byUrl: Map<string, Date>,
 ) {
-  const generatedAt = parseIsoTimestamp(opportunity.generated_at)
-  if (generatedAt) return generatedAt
+  let resolved = parseIsoTimestamp(opportunity.generated_at)
 
   if (opportunity.source_fingerprint) {
-    const sourceTimestamp = byFingerprint.get(opportunity.source_fingerprint)
-    if (sourceTimestamp) return sourceTimestamp
+    const sourceTimestamp =
+      byFingerprint.get(opportunity.source_fingerprint) ?? byFingerprint.get(normalize(opportunity.source_fingerprint))
+    if (sourceTimestamp && (!resolved || sourceTimestamp.getTime() > resolved.getTime())) {
+      resolved = sourceTimestamp
+    }
   }
 
   if (opportunity.source_url) {
-    const sourceTimestamp = byUrl.get(opportunity.source_url)
-    if (sourceTimestamp) return sourceTimestamp
+    sourceUrlLookupKeys(opportunity.source_url).forEach((key) => {
+      const sourceTimestamp = byUrl.get(key)
+      if (sourceTimestamp && (!resolved || sourceTimestamp.getTime() > resolved.getTime())) {
+        resolved = sourceTimestamp
+      }
+    })
   }
 
-  return null
+  return resolved
 }
 
 function ScoreDonut({ scoring }: { scoring: OpportunityScoring }) {
@@ -293,7 +395,9 @@ export default function App() {
 
   const feedRef = useRef<HTMLDivElement | null>(null)
   const activeIndexRef = useRef(0)
-  const wheelLockRef = useRef(false)
+  const wheelLockUntilRef = useRef(0)
+  const wheelAccumulatedDeltaRef = useRef(0)
+  const wheelLastEventAtRef = useRef(0)
   const feedDragRef = useRef<FeedDragState | null>(null)
   const suppressFeedClickUntilRef = useRef(0)
 
@@ -393,11 +497,14 @@ export default function App() {
       if (!timestamp) return
 
       if (signal.fingerprint) {
-        byFingerprint.set(signal.fingerprint, timestamp)
+        setLatestTimestamp(byFingerprint, signal.fingerprint, timestamp)
+        setLatestTimestamp(byFingerprint, normalize(signal.fingerprint), timestamp)
       }
 
       if (signal.url) {
-        byUrl.set(signal.url, timestamp)
+        sourceUrlLookupKeys(signal.url).forEach((key) => {
+          setLatestTimestamp(byUrl, key, timestamp)
+        })
       }
     })
 
@@ -433,16 +540,24 @@ export default function App() {
     return grouped
   }, [apiOpportunities, signalTimestampLookup, todayKey])
 
+  const hasTodayOpportunities = useMemo(() => {
+    return (opportunitiesByDay.get(todayKey)?.length ?? 0) > 0
+  }, [opportunitiesByDay, todayKey])
+
   const latestOpportunityDayKey = useMemo(() => {
-    return Array.from(opportunitiesByDay.keys()).sort((a, b) => b.localeCompare(a))[0] ?? null
+    return Array.from(opportunitiesByDay.keys()).sort(compareDayKeysDesc)[0] ?? null
   }, [opportunitiesByDay])
 
   const visibleDayKey = useMemo(() => {
+    if (dayPreference === 'today' && hasTodayOpportunities) {
+      return todayKey
+    }
+
     if (opportunitiesByDay.has(preferredDayKey)) {
       return preferredDayKey
     }
     return latestOpportunityDayKey ?? preferredDayKey
-  }, [latestOpportunityDayKey, opportunitiesByDay, preferredDayKey])
+  }, [dayPreference, hasTodayOpportunities, latestOpportunityDayKey, opportunitiesByDay, preferredDayKey, todayKey])
 
   const visibleOpportunities = useMemo<OpportunityWithTimestamp[]>(() => {
     return opportunitiesByDay.get(visibleDayKey) ?? []
@@ -548,27 +663,66 @@ export default function App() {
     [scrollToCard, visibleOpportunities.length],
   )
 
+  const findNearestCardIndexForScrollLeft = useCallback(
+    (scrollLeft: number) => {
+      const container = feedRef.current
+      if (!container) return -1
+
+      const cards = getFeedCards()
+      if (!cards.length) return -1
+
+      const anchor = scrollLeft + container.clientWidth * 0.38
+      let nearestIndex = 0
+      let nearestDistance = Number.POSITIVE_INFINITY
+
+      cards.forEach((card, index) => {
+        const distance = Math.abs(getCardOffsetLeft(container, card) - anchor)
+        if (distance < nearestDistance) {
+          nearestDistance = distance
+          nearestIndex = index
+        }
+      })
+
+      return nearestIndex
+    },
+    [getCardOffsetLeft, getFeedCards],
+  )
+
   const findNearestCardIndex = useCallback(() => {
     const container = feedRef.current
     if (!container) return -1
+    return findNearestCardIndexForScrollLeft(container.scrollLeft)
+  }, [findNearestCardIndexForScrollLeft])
 
-    const cards = getFeedCards()
-    if (!cards.length) return -1
-
-    const anchor = container.scrollLeft + container.clientWidth * 0.38
-    let nearestIndex = 0
-    let nearestDistance = Number.POSITIVE_INFINITY
-
-    cards.forEach((card, index) => {
-      const distance = Math.abs(getCardOffsetLeft(container, card) - anchor)
-      if (distance < nearestDistance) {
-        nearestDistance = distance
-        nearestIndex = index
+  const estimateCardStepWidth = useCallback(
+    (container: HTMLDivElement, cards: HTMLElement[]) => {
+      if (cards.length < 2) {
+        return Math.max(container.clientWidth * 0.82, 1)
       }
-    })
 
-    return nearestIndex
-  }, [getCardOffsetLeft, getFeedCards])
+      let totalStepWidth = 0
+      let stepCount = 0
+
+      cards.forEach((card, index) => {
+        if (index === 0) return
+
+        const left = getCardOffsetLeft(container, card)
+        const prevLeft = getCardOffsetLeft(container, cards[index - 1])
+        const stepWidth = left - prevLeft
+        if (stepWidth > 1) {
+          totalStepWidth += stepWidth
+          stepCount += 1
+        }
+      })
+
+      if (stepCount > 0) {
+        return totalStepWidth / stepCount
+      }
+
+      return Math.max(cards[0].getBoundingClientRect().width, 1)
+    },
+    [getCardOffsetLeft],
+  )
 
   const onFeedPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!event.isPrimary) return
@@ -581,11 +735,17 @@ export default function App() {
     feedDragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
+      startY: event.clientY,
       startScrollLeft: container.scrollLeft,
+      startIndex: activeIndexRef.current,
       moved: false,
+      intent: 'undecided',
+      lastX: event.clientX,
+      lastTime: window.performance.now(),
+      velocityX: 0,
+      hasCapture: false,
     }
-    event.currentTarget.setPointerCapture(event.pointerId)
-    setIsDraggingFeed(true)
+    setIsDraggingFeed(false)
   }, [])
 
   const onFeedPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -596,11 +756,45 @@ export default function App() {
     if (!container) return
 
     const deltaX = event.clientX - drag.startX
-    if (!drag.moved && Math.abs(deltaX) >= DRAG_START_THRESHOLD_PX) {
+    const deltaY = event.clientY - drag.startY
+
+    if (drag.intent === 'undecided') {
+      const absX = Math.abs(deltaX)
+      const absY = Math.abs(deltaY)
+
+      if (absX < DRAG_AXIS_LOCK_THRESHOLD_PX && absY < DRAG_AXIS_LOCK_THRESHOLD_PX) {
+        return
+      }
+
+      if (absY > absX) {
+        feedDragRef.current = null
+        setIsDraggingFeed(false)
+        return
+      }
+
+      if (absX < DRAG_START_THRESHOLD_PX) {
+        return
+      }
+
+      drag.intent = 'horizontal'
       drag.moved = true
+
+      if (!drag.hasCapture) {
+        event.currentTarget.setPointerCapture(event.pointerId)
+        drag.hasCapture = true
+      }
+
+      setIsDraggingFeed(true)
     }
 
-    if (!drag.moved) return
+    if (drag.intent !== 'horizontal' || !drag.moved) return
+
+    const now = window.performance.now()
+    const elapsed = Math.max(now - drag.lastTime, 1)
+    const instantVelocity = (event.clientX - drag.lastX) / elapsed
+    drag.velocityX = drag.velocityX * 0.76 + instantVelocity * 0.24
+    drag.lastX = event.clientX
+    drag.lastTime = now
 
     event.preventDefault()
     container.scrollLeft = drag.startScrollLeft - deltaX
@@ -611,22 +805,54 @@ export default function App() {
       const drag = feedDragRef.current
       if (!drag || drag.pointerId !== event.pointerId) return
 
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      if (drag.hasCapture && event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId)
       }
 
-      if (drag.moved) {
+      if (drag.intent === 'horizontal' && drag.moved) {
         suppressFeedClickUntilRef.current = window.performance.now() + DRAG_CLICK_SUPPRESS_MS
-        const nearestIndex = findNearestCardIndex()
-        if (nearestIndex >= 0) {
-          scrollToCard(nearestIndex)
+        const container = feedRef.current
+        if (container) {
+          const cards = getFeedCards()
+          const nearestIndex = findNearestCardIndex()
+
+          if (cards.length) {
+            const stepWidth = estimateCardStepWidth(container, cards)
+            const dragDistance = container.scrollLeft - drag.startScrollLeft
+            const dragDistanceRatio = Math.abs(dragDistance) / stepWidth
+            const scrollVelocity = -drag.velocityX
+            const shouldAdvanceByGesture =
+              dragDistanceRatio >= DRAG_DISTANCE_SNAP_RATIO ||
+              Math.abs(scrollVelocity) >= DRAG_FLICK_VELOCITY_PX_PER_MS
+
+            let targetIndex = nearestIndex
+
+            if (shouldAdvanceByGesture) {
+              const projectedScrollLeft = container.scrollLeft + scrollVelocity * DRAG_MOMENTUM_MS
+              const projectedIndex = findNearestCardIndexForScrollLeft(projectedScrollLeft)
+              const direction = Math.sign(dragDistance || scrollVelocity)
+              const fallbackStep = direction > 0 ? 1 : -1
+              const rawStep = projectedIndex - drag.startIndex
+              let step = rawStep === 0 ? fallbackStep : rawStep
+
+              step = clamp(step, -DRAG_MAX_JUMP_CARDS, DRAG_MAX_JUMP_CARDS)
+              if (direction > 0 && step < 1) step = 1
+              if (direction < 0 && step > -1) step = -1
+
+              targetIndex = clamp(drag.startIndex + step, 0, cards.length - 1)
+            }
+
+            if (targetIndex >= 0) {
+              scrollToCard(targetIndex)
+            }
+          }
         }
       }
 
       feedDragRef.current = null
       setIsDraggingFeed(false)
     },
-    [findNearestCardIndex, scrollToCard],
+    [estimateCardStepWidth, findNearestCardIndex, findNearestCardIndexForScrollLeft, getFeedCards, scrollToCard],
   )
 
   const onFeedClickCapture = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
@@ -703,22 +929,32 @@ export default function App() {
 
     const onWheel = (event: WheelEvent) => {
       if (visibleOpportunities.length < 2) return
-      const dominantDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
-      if (Math.abs(dominantDelta) < 5) return
-      if (shouldAllowCardVerticalWheel(event.target, dominantDelta)) return
+      const now = window.performance.now()
+      const deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode)
+      const deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode)
+      const horizontalIntent = Math.abs(deltaX) >= Math.abs(deltaY) * WHEEL_AXIS_INTENT_RATIO
+      const dominantDelta = horizontalIntent ? deltaX : deltaY
+      if (Math.abs(dominantDelta) < WHEEL_DELTA_IGNORE_PX) return
+      if (!horizontalIntent && shouldAllowCardVerticalWheel(event.target, deltaY)) return
 
       event.preventDefault()
-      if (wheelLockRef.current) return
+      if (now < wheelLockUntilRef.current) return
 
-      const direction = dominantDelta > 0 ? 1 : -1
+      if (now - wheelLastEventAtRef.current > WHEEL_GESTURE_RESET_MS) {
+        wheelAccumulatedDeltaRef.current = 0
+      }
+      wheelLastEventAtRef.current = now
+      wheelAccumulatedDeltaRef.current += dominantDelta
+
+      if (Math.abs(wheelAccumulatedDeltaRef.current) < WHEEL_SNAP_DELTA_PX) return
+
+      const direction = wheelAccumulatedDeltaRef.current > 0 ? 1 : -1
+      wheelAccumulatedDeltaRef.current = 0
       const nextIndex = clamp(activeIndexRef.current + direction, 0, visibleOpportunities.length - 1)
       if (nextIndex === activeIndexRef.current) return
 
-      wheelLockRef.current = true
+      wheelLockUntilRef.current = now + SNAP_LOCK_MS
       scrollToCard(nextIndex)
-      window.setTimeout(() => {
-        wheelLockRef.current = false
-      }, SNAP_LOCK_MS)
     }
 
     container.addEventListener('wheel', onWheel, { passive: false })
