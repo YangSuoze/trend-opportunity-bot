@@ -24,6 +24,12 @@ const WHEEL_DELTA_IGNORE_PX = 10
 const WHEEL_SNAP_DELTA_PX = 54
 const WHEEL_GESTURE_RESET_MS = 180
 const WHEEL_AXIS_INTENT_RATIO = 0.78
+const AUTO_COLLECT_WINDOW = '24h'
+const AUTO_COLLECT_LIMIT = 120
+const AUTO_ANALYZE_TOP = 30
+const JOB_POLL_MS = 450
+const AUTO_TOKEN_WARNING_HINT =
+  'Likely cause: missing collector/API tokens in .env (GITHUB_TOKEN is recommended).'
 
 type ScoreDimensionKey = Exclude<keyof OpportunityScoring, 'total'>
 type DayPreference = 'today' | 'yesterday'
@@ -54,6 +60,41 @@ interface FeedDragState {
 interface OpportunityWithTimestamp {
   card: OpportunityCard
   timestamp: Date | null
+}
+
+interface ArtifactSnapshot {
+  status: ApiStatusPayload
+  signals: SignalRecord[]
+  opportunities: OpportunityCard[]
+}
+
+interface JobStartPayload {
+  jobId: string
+}
+
+type JobStatus = 'queued' | 'running' | 'done' | 'error'
+
+interface JobSnapshotPayload {
+  id: string
+  kind: string
+  status: JobStatus
+  error?: string | null
+}
+
+interface JobProgressPayload {
+  i?: number
+  total?: number
+  title?: string
+  source?: string
+}
+
+interface JobDonePayload {
+  counts?: Record<string, number>
+}
+
+interface AnalyzeStreamResult {
+  counts: Record<string, number>
+  streamedCardCount: number
 }
 
 const SCORE_DIMENSIONS: Array<{ key: ScoreDimensionKey; label: string; color: string }> = [
@@ -273,6 +314,45 @@ function cardKey(card: OpportunityCard, index: number) {
   return card.source_fingerprint || card.source_url || `${card.source}-${card.solution}-${index}`
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
+}
+
+function parseJsonRecord(raw: string) {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null
+  } catch {
+    return null
+  }
+}
+
+function opportunityIdentity(card: OpportunityCard) {
+  const fingerprint = normalize(card.source_fingerprint || '')
+  if (fingerprint) return `fp:${fingerprint}`
+
+  const normalizedUrl = normalizeSourceUrl(card.source_url)
+  if (normalizedUrl) return `url:${normalizedUrl}`
+
+  return `fallback:${normalize(card.source)}:${normalize(card.solution)}`
+}
+
+function upsertOpportunity(prev: OpportunityCard[], incoming: OpportunityCard) {
+  const targetIdentity = opportunityIdentity(incoming)
+  const existingIndex = prev.findIndex((card) => opportunityIdentity(card) === targetIdentity)
+  if (existingIndex === -1) {
+    return [...prev, incoming]
+  }
+
+  const next = [...prev]
+  next[existingIndex] = incoming
+  return next
+}
+
 function resolveOpportunityTimestamp(
   opportunity: OpportunityCard,
   byFingerprint: Map<string, Date>,
@@ -362,8 +442,8 @@ function SignalMeter({ label, value }: { label: string; value: string }) {
   )
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url)
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init)
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`)
   }
@@ -376,6 +456,14 @@ async function fetchText(url: string): Promise<string> {
     throw new Error(`${response.status} ${response.statusText}`)
   }
   return response.text()
+}
+
+async function postJson<T>(url: string, payload: Record<string, unknown>): Promise<T> {
+  return fetchJson<T>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
 }
 
 export default function App() {
@@ -392,6 +480,10 @@ export default function App() {
   const [dayPreference, setDayPreference] = useState<DayPreference>('today')
   const [activeIndex, setActiveIndex] = useState(0)
   const [isDraggingFeed, setIsDraggingFeed] = useState(false)
+  const [isAutoGenerating, setIsAutoGenerating] = useState(false)
+  const [autoPipelineStatusText, setAutoPipelineStatusText] = useState('')
+  const [autoPipelineWarning, setAutoPipelineWarning] = useState('')
+  const [hasFetchedArtifactsOnce, setHasFetchedArtifactsOnce] = useState(false)
 
   const feedRef = useRef<HTMLDivElement | null>(null)
   const activeIndexRef = useRef(0)
@@ -400,8 +492,10 @@ export default function App() {
   const wheelLastEventAtRef = useRef(0)
   const feedDragRef = useRef<FeedDragState | null>(null)
   const suppressFeedClickUntilRef = useRef(0)
+  const autoRunAttemptedRef = useRef(false)
+  const autoPipelineRunningRef = useRef(false)
 
-  const refreshApiArtifacts = useCallback(async () => {
+  const refreshApiArtifacts = useCallback(async (): Promise<ArtifactSnapshot | null> => {
     setIsApiLoading(true)
     setApiError('')
 
@@ -415,17 +509,201 @@ export default function App() {
       // Trigger report endpoint fetch as part of startup/refresh artifact sync.
       void fetchText(`${apiBase}/api/artifacts/report`).catch(() => '')
 
+      const nextSignals = Array.isArray(signalsPayload) ? signalsPayload : []
+      const nextOpportunities = Array.isArray(opportunitiesPayload) ? opportunitiesPayload : []
+
       setApiStatus(statusPayload)
-      setApiSignals(Array.isArray(signalsPayload) ? signalsPayload : [])
-      setApiOpportunities(Array.isArray(opportunitiesPayload) ? opportunitiesPayload : [])
+      setApiSignals(nextSignals)
+      setApiOpportunities(nextOpportunities)
       setLastUpdatedAt(new Date())
       setTodayKey(toLocalDayKey(new Date()))
+      return {
+        status: statusPayload,
+        signals: nextSignals,
+        opportunities: nextOpportunities,
+      }
     } catch (error) {
       setApiError(error instanceof Error ? error.message : String(error))
+      return null
     } finally {
       setIsApiLoading(false)
+      setHasFetchedArtifactsOnce(true)
     }
   }, [apiBase])
+
+  const onRefreshClick = useCallback(() => {
+    autoRunAttemptedRef.current = false
+    setAutoPipelineWarning('')
+    setAutoPipelineStatusText('')
+    void refreshApiArtifacts()
+  }, [refreshApiArtifacts])
+
+  const waitForJobTerminal = useCallback(
+    async (jobId: string, stageLabel: string) => {
+      while (true) {
+        const snapshot = await fetchJson<JobSnapshotPayload>(`${apiBase}/api/jobs/${jobId}`)
+
+        if (snapshot.status === 'done') {
+          return snapshot
+        }
+
+        if (snapshot.status === 'error') {
+          throw new Error(snapshot.error || `${stageLabel} job failed`)
+        }
+
+        await sleep(JOB_POLL_MS)
+      }
+    },
+    [apiBase],
+  )
+
+  const streamAnalyzeJobEvents = useCallback(
+    (jobId: string) =>
+      new Promise<AnalyzeStreamResult>((resolve, reject) => {
+        const streamUrl = `${apiBase}/api/jobs/${jobId}/events`
+        const source = new EventSource(streamUrl)
+        let settled = false
+        let streamedCardCount = 0
+        let doneCounts: Record<string, number> = {}
+
+        const closeStream = () => {
+          source.close()
+        }
+
+        const resolveOnce = () => {
+          if (settled) return
+          settled = true
+          closeStream()
+          resolve({ counts: doneCounts, streamedCardCount })
+        }
+
+        const rejectOnce = (error: Error) => {
+          if (settled) return
+          settled = true
+          closeStream()
+          reject(error)
+        }
+
+        source.addEventListener('progress', (event) => {
+          if (!(event instanceof MessageEvent)) return
+
+          const payload = parseJsonRecord(event.data) as JobProgressPayload | null
+          if (!payload) return
+
+          const progressValue =
+            typeof payload.i === 'number' && typeof payload.total === 'number'
+              ? ` ${payload.i}/${payload.total}`
+              : ''
+          const sourceValue = typeof payload.source === 'string' ? ` [${payload.source}]` : ''
+          const titleValue = typeof payload.title === 'string' ? ` ${payload.title}` : ''
+
+          setAutoPipelineStatusText(`Auto-generating... analyzing${progressValue}${sourceValue}${titleValue}`)
+        })
+
+        source.addEventListener('card', (event) => {
+          if (!(event instanceof MessageEvent)) return
+
+          const payload = parseJsonRecord(event.data)
+          const cardCandidate = payload?.card
+          if (!cardCandidate || typeof cardCandidate !== 'object' || Array.isArray(cardCandidate)) return
+
+          streamedCardCount += 1
+          const incomingCard = cardCandidate as OpportunityCard
+
+          setApiOpportunities((prev) => upsertOpportunity(prev, incomingCard))
+          setLastUpdatedAt(new Date())
+          setAutoPipelineStatusText(`Auto-generating... analyzing (cards: ${streamedCardCount})`)
+        })
+
+        source.addEventListener('done', (event) => {
+          if (event instanceof MessageEvent) {
+            const payload = parseJsonRecord(event.data) as JobDonePayload | null
+            const rawCounts = payload?.counts
+            if (rawCounts && typeof rawCounts === 'object' && !Array.isArray(rawCounts)) {
+              doneCounts = Object.entries(rawCounts).reduce<Record<string, number>>((acc, [key, value]) => {
+                if (typeof value === 'number' && Number.isFinite(value)) {
+                  acc[key] = value
+                }
+                return acc
+              }, {})
+            }
+          }
+
+          resolveOnce()
+        })
+
+        source.addEventListener('error', (event) => {
+          if (event instanceof MessageEvent) {
+            const payload = parseJsonRecord(event.data)
+            const message = typeof payload?.message === 'string' ? payload.message : 'Analyze warning'
+            setAutoPipelineStatusText(`Auto-generating... ${message}`)
+            return
+          }
+
+          void fetchJson<JobSnapshotPayload>(`${apiBase}/api/jobs/${jobId}`)
+            .then((snapshot) => {
+              if (settled) return
+              if (snapshot.status === 'done') {
+                resolveOnce()
+                return
+              }
+              if (snapshot.status === 'error') {
+                rejectOnce(new Error(snapshot.error || 'Analyze job failed'))
+                return
+              }
+
+              setAutoPipelineStatusText('Auto-generating... reconnecting analyze stream...')
+            })
+            .catch((error) => {
+              const message = error instanceof Error ? error.message : String(error)
+              rejectOnce(new Error(`Analyze stream failed: ${message}`))
+            })
+        })
+      }),
+    [apiBase],
+  )
+
+  const runAutoPipeline = useCallback(async () => {
+    if (autoPipelineRunningRef.current) return
+    autoPipelineRunningRef.current = true
+
+    setIsAutoGenerating(true)
+    setAutoPipelineWarning('')
+
+    try {
+      setAutoPipelineStatusText('Auto-generating... collecting signals')
+      const collectJob = await postJson<JobStartPayload>(`${apiBase}/api/collect`, {
+        window: AUTO_COLLECT_WINDOW,
+        limit: AUTO_COLLECT_LIMIT,
+      })
+      await waitForJobTerminal(collectJob.jobId, 'Collect')
+
+      setAutoPipelineStatusText('Auto-generating... analyzing opportunities')
+      const analyzeJob = await postJson<JobStartPayload>(`${apiBase}/api/analyze`, {
+        top: AUTO_ANALYZE_TOP,
+        resume: true,
+      })
+      const analyzeResult = await streamAnalyzeJobEvents(analyzeJob.jobId)
+
+      setAutoPipelineStatusText('Auto-generating... generating report')
+      const reportJob = await postJson<JobStartPayload>(`${apiBase}/api/report`, {})
+      await waitForJobTerminal(reportJob.jobId, 'Report')
+
+      const refreshed = await refreshApiArtifacts()
+      const reconciledCount = refreshed?.opportunities.length ?? 0
+      const doneCount = Number(analyzeResult.counts.total_cards ?? 0)
+      if (reconciledCount <= 0 && doneCount <= 0 && analyzeResult.streamedCardCount <= 0) {
+        setAutoPipelineWarning(`Auto-generation returned 0 cards. ${AUTO_TOKEN_WARNING_HINT}`)
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setAutoPipelineWarning(`Auto-generation failed: ${message}. ${AUTO_TOKEN_WARNING_HINT}`)
+    } finally {
+      autoPipelineRunningRef.current = false
+      setIsAutoGenerating(false)
+      setAutoPipelineStatusText('')
+    }
+  }, [apiBase, refreshApiArtifacts, streamAnalyzeJobEvents, waitForJobTerminal])
 
   useEffect(() => {
     void refreshApiArtifacts()
@@ -607,6 +885,23 @@ export default function App() {
   const hasAnyOpportunities = apiOpportunities.length > 0
   const isUsingFallbackDay = hasAnyOpportunities && visibleDayKey !== preferredDayKey
   const lastUpdatedLabel = lastUpdatedAt ? dateTimeFormatter.format(lastUpdatedAt) : 'Not yet synced'
+  const shouldAutoRunWhenEmpty =
+    !hasTodayOpportunities && (apiOpportunities.length === 0 || visibleOpportunities.length === 0)
+
+  useEffect(() => {
+    if (!hasFetchedArtifactsOnce || isApiLoading || isAutoGenerating) return
+    if (!shouldAutoRunWhenEmpty) return
+    if (autoRunAttemptedRef.current || autoPipelineRunningRef.current) return
+
+    autoRunAttemptedRef.current = true
+    void runAutoPipeline()
+  }, [
+    hasFetchedArtifactsOnce,
+    isApiLoading,
+    isAutoGenerating,
+    runAutoPipeline,
+    shouldAutoRunWhenEmpty,
+  ])
 
   const getFeedCards = useCallback(() => {
     const container = feedRef.current
@@ -998,8 +1293,8 @@ export default function App() {
           <button
             type="button"
             className="btn btnSecondary"
-            onClick={() => void refreshApiArtifacts()}
-            disabled={isApiLoading}
+            onClick={onRefreshClick}
+            disabled={isApiLoading || isAutoGenerating}
           >
             {isApiLoading ? 'Refreshing…' : 'Refresh'}
           </button>
@@ -1007,6 +1302,7 @@ export default function App() {
       </header>
 
       {apiError ? <p className="warnText">API error: {apiError}</p> : null}
+      {autoPipelineWarning ? <p className="warnText">{autoPipelineWarning}</p> : null}
 
       <main className="feedColumn">
         <section className="cardSurface feedPanel">
@@ -1019,6 +1315,11 @@ export default function App() {
               {isUsingFallbackDay ? (
                 <p className="dayFallbackNote">
                   No opportunities for {dayPreference}. Showing latest available day instead.
+                </p>
+              ) : null}
+              {isAutoGenerating ? (
+                <p className="autoStatus" role="status" aria-live="polite">
+                  {autoPipelineStatusText || 'Auto-generating...'}
                 </p>
               ) : null}
             </div>
