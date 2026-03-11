@@ -11,10 +11,10 @@ from trendbot.openai_client import OpenAIClient, OpenAIClientError
 from trendbot.utils import append_jsonl, deduplicate_signals, read_jsonl, write_jsonl
 
 _SYSTEM_PROMPT = """
-You are a product strategist. Return ONLY valid JSON.
-Given one trend signal, produce one concise opportunity card.
-Use Chinese (zh-CN) for zh_summary and zh_analysis.
-Scoring dimensions must be integers 0..5 for:
+你是一名产品策略师。仅返回有效的JSON数据。
+给定一个趋势信号，生成一张简洁的机会卡。
+对于zh_summary和zh_analysis，请使用中文（zh-CN）。
+对于以下项目，评分维度必须是0到5之间的整数：
 - demand
 - urgency
 - distribution
@@ -186,12 +186,10 @@ def _as_float(value: object) -> float:
 
 def _build_user_prompt(signal: Signal) -> str:
     return (
-        "Create one opportunity card from this signal.\n"
-        "Keep each field concrete and concise.\n"
-        "Return zh_summary and zh_analysis in Chinese (zh-CN).\n"
-        "Return JSON with keys: target_user, trigger, pain, existing_alternatives, "
-        "solution, pricing_reason, validation_7d, success_signal, zh_summary, "
-        "zh_analysis, scoring.\n"
+        "根据这个信号，创造一个机会卡。\n"
+        "保持每个字段具体且简洁。\n"
+        "返回中文（zh-CN）的zh_summary和zh_analysis。\n"
+        "返回的JSON包含以下键：target_user、trigger、pain、existing_alternatives、solution、pricing_reason、validation_7d、success_signal、zh_summary、zh_analysis、scoring。"
         "Signal:\n"
         f"source: {signal.source}\n"
         f"title: {signal.title}\n"

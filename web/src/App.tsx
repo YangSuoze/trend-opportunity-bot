@@ -11,8 +11,8 @@ import {
 import './App.css'
 import type { OpportunityCard, OpportunityScoring, SignalRecord } from './types'
 
-const DEFAULT_API_BASE = import.meta.env.VITE_TRENDBOT_API_BASE ?? 'http://127.0.0.1:8000'
-const SNAP_LOCK_MS = 520
+const DEFAULT_API_BASE = import.meta.env.VITE_TRENDBOT_API_BASE ?? 'http://127.0.0.1:8001'
+const SNAP_LOCK_MS = 340
 const DRAG_START_THRESHOLD_PX = 6
 const DRAG_CLICK_SUPPRESS_MS = 140
 const DRAG_AXIS_LOCK_THRESHOLD_PX = 8
